@@ -171,6 +171,10 @@ database, the logs and the dashboard token.
 
 ## Documentation
 
+For daily property-dealer calling lists in an agent harness, see the optional
+[Sellbird skill](docs/sellbird-skill.md) (Codex, Claude Code, Hermes and other
+SKILL.md-compatible agents).
+
 | Guide | What's in it |
 |---|---|
 | [How Sellbird works](docs/how-it-works.md) | The heartbeat loop, the subscription budget, project structure and the ideas behind it |

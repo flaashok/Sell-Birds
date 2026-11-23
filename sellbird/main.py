@@ -5,6 +5,7 @@ import logging
 import signal
 import sys
 from datetime import datetime, time, timedelta
+from pathlib import Path
 
 import pytz
 
@@ -56,6 +57,26 @@ ERROR_BACKOFF_CAP = 900
 # between one stuck agent and Sellbird freezing for hours with no agent
 # knowing it's dead — found in production after exactly that happened.
 CYCLE_TIMEOUT_SECONDS = 600
+
+
+def database_folder_gone(locator) -> str | None:
+    """The folder a SQLite database should be in, when it no longer exists.
+
+    The database path is fixed when `sellbird run` starts. Move or rename the
+    install folder while it runs and every cycle after fails with "unable to
+    open database file": found in production after five days of retries in
+    which nothing approved went out. Retrying can't fix that, so the loop
+    stops and says why. None for a storage backend or :memory:.
+    """
+    from sellbird import storage
+    try:
+        backend, name = storage.split(locator)
+    except LookupError:
+        return None
+    if backend is not None or name == ":memory:" or name.startswith("file:"):
+        return None
+    folder = Path(name).parent
+    return None if folder.is_dir() else str(folder)
 
 # Cap on a single quiet-hours sleep chunk. See the quiet-hours block in
 # heartbeat() for why this exists — a system sleep/wake cycle during one
@@ -487,6 +508,14 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
         except (KeyboardInterrupt, asyncio.CancelledError):
             break
         except Exception as e:
+            gone = database_folder_gone(state.db_path)
+            if gone:
+                logger.critical(
+                    f"Sellbird's data folder is gone ({gone}): the install was moved, renamed "
+                    f"or deleted while it ran. Nothing can be read or sent from here, so it is "
+                    f"stopping. Start `sellbird run` again from where the folder is now."
+                )
+                break
             consecutive_errors += 1
             backoff = min(
                 ERROR_BACKOFF_BASE * (2 ** (consecutive_errors - 1)),

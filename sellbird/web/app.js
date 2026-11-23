@@ -172,6 +172,21 @@ function initials(first, last) {
 }
 
 // Stored times are UTC, often without a zone ("2026-10-21 03:07:57").
+// An approved email whose send time is well past hasn't gone out, and a past
+// date alone reads as if it had. Approving moves a send time that passed
+// while the draft waited up to the moment of approval, so this isn't the
+// draft's age. Twelve hours covers waiting for the recipient's working hours;
+// past that, something is holding it (often the background loop not
+// running), so it says so.
+const OVERDUE_AFTER_MS = 12 * 3600 * 1000;
+function sendsCell(sendAt) {
+  const when = escHtml(formatDate(sendAt));
+  const t = parseTs(sendAt);
+  if (!when || isNaN(t) || Date.now() - t < OVERDUE_AFTER_MS) return when;
+  return '<span class="badge t-bad" title="Approved but not sent. Check that Sellbird is ' +
+    'running and what its log says.">Overdue</span> ' + when;
+}
+
 function parseTs(d) {
   let t = String(d || '').trim().replace(' ', 'T');
   if (t && !/[zZ]$|[+-]\d\d:?\d\d$/.test(t)) t += 'Z';
@@ -1704,7 +1719,9 @@ async function loadOutbox() {
   list.innerHTML =
     table('Approved &amp; scheduled', data.approved, [
       ['To', r => r.to_email], ['Step', r => r.step], ['Subject', r => r.subject],
-      ['Sends', r => r.status === 'sending' ? badge(r.status) : escHtml(formatDate(r.send_at)), true, true],
+      ['Sends', r => r.status === 'sending' ? badge(r.status)
+        : r.waits_for_step ? 'After step ' + escHtml(String(r.waits_for_step)) + ' goes'
+        : sendsCell(r.send_at), true, true],
     ]) +
     table('Recently sent', data.sent, [
       ['To', r => r.to_email], ['Step', r => r.step], ['Subject', r => r.subject],

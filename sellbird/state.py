@@ -1360,22 +1360,32 @@ class StateManager:
 
         A human's approval (dashboard or CLI): marked approved_by 'you', so
         the autopilot review (gate.autopilot_review) doesn't hold it again,
-        and any reason it was held is cleared."""
+        and any reason it was held is cleared.
+
+        A send time is planned when the draft is written. One that passed
+        while the draft waited becomes the time it was approved: the email
+        goes from approval (at the recipient's next send window), and the
+        Outbox shows when it will really go rather than the day it was
+        drafted. Follow-ups keep theirs: they go a set gap after the email
+        before them actually went out (Sender._follow_up_order)."""
+        now = _utcnow().isoformat()
+        send_at = ("send_at = CASE WHEN (COALESCE(kind, '') != 'sequence' OR step <= 1) "
+                   "AND (send_at IS NULL OR send_at < ?) THEN ? ELSE send_at END")
         async with self._connect() as db:
             if item_id:
                 cursor = await db.execute(
                     "UPDATE outbox SET status = 'approved', approved_by = 'you', error = '', "
-                    "updated_at = ? WHERE id = ? AND status = 'pending_review'",
-                    (_utcnow().isoformat(), item_id),
+                    f"{send_at}, updated_at = ? WHERE id = ? AND status = 'pending_review'",
+                    (now, now, now, item_id),
                 )
             else:
                 # Not the ones autopilot held for a look (possible planted
                 # links or a leak): those are approved one at a time.
                 cursor = await db.execute(
                     "UPDATE outbox SET status = 'approved', approved_by = 'you', error = '', "
-                    "updated_at = ? WHERE status = 'pending_review' "
+                    f"{send_at}, updated_at = ? WHERE status = 'pending_review' "
                     "AND COALESCE(error, '') NOT LIKE ?",
-                    (_utcnow().isoformat(), HELD_FOR_REVIEW + "%"),
+                    (now, now, now, HELD_FOR_REVIEW + "%"),
                 )
             await db.commit()
             return cursor.rowcount

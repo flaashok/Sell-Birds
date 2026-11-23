@@ -159,3 +159,21 @@ async def test_follow_ups_are_staged_unless_turned_off(state):
     await make_sender(state, FakeProvider())._run_native()
     steps = sorted(i["step"] for i in await state.get_outbox(status="pending_review"))
     assert steps == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_approving_an_old_draft_plans_it_from_approval_not_drafting(state):
+    pid = await seed_prospect(state, status="queued")
+    week_ago = _now() - timedelta(days=7)
+    first = await _sequence(state, pid, 1, "pending_review", week_ago)
+    second = await _sequence(state, pid, 2, "pending_review", week_ago + timedelta(days=3))
+    ahead = _now() + timedelta(days=2)
+    later = await _sequence(state, pid, 1, "pending_review", ahead, campaign="c2", to="joe@acme.com")
+    before = _now()
+    await state.approve_outbox()
+    first_at = datetime.fromisoformat((await state.get_outbox_item(first))["send_at"])
+    assert first_at >= before                    # from approval, not a week back
+    # A follow-up keeps its plan: it goes a gap after step 1 really goes.
+    assert (await state.get_outbox_item(second))["send_at"] == (week_ago + timedelta(days=3)).isoformat()
+    # A time still ahead is kept.
+    assert (await state.get_outbox_item(later))["send_at"] == ahead.isoformat()

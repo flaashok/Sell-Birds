@@ -37,7 +37,15 @@ _NON_RETRYABLE_PATTERNS = (
     "please run `claude login`",
     "invalid api key",
     "unauthorized",
+    # An expired subscription login: the CLI can't refresh it on its own.
+    "failed to authenticate",
+    "oauth session expired",
+    "oauth token has expired",
+    "please run /login",
 )
+
+CLAUDE_LOGIN_HELP = ("Run `claude` in a terminal and type /login, then Sellbird "
+                     "picks it up on its next call (no restart needed).")
 
 
 PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex"}
@@ -73,6 +81,12 @@ def active_brain_status(raw: str, provider: str) -> dict:
     now), else {}: a pause recorded for Codex says nothing about Claude."""
     status = parse_brain_status(raw)
     return status if status.get("provider") == provider else {}
+
+
+def _is_login_error(text: str) -> bool:
+    """Whether a Claude CLI error means its login is missing or expired."""
+    low = (text or "").lower()
+    return any(p in low for p in _NON_RETRYABLE_PATTERNS)
 
 
 class BrainUnavailable(Exception):
@@ -124,6 +138,10 @@ class Brain:
         self._usage_limited_until = 0.0
         self._usage_pause_recorded = False
         self._status_synced = False
+        # Claude's login: whether this process saw it fail, and whether a
+        # pause stored by an earlier run was cleared after a call worked.
+        self._claude_login_failed = False
+        self._claude_status_checked = False
         if self.provider == "codex":
             from sellbird.codex import CodexClient, CodexQuotaClient
             self.codex = CodexClient(
@@ -262,6 +280,36 @@ class Brain:
         self._unavailable_fingerprint = None
         await self._record_status("ok", "")
 
+    async def _claude_login_problem(self, error: str):
+        """Claude's login failed: retrying can't help, so say so where the
+        operator looks (dashboard, `sellbird status`), once per outage."""
+        logger.error(f"Claude can't sign in. {CLAUDE_LOGIN_HELP}")
+        if not self._claude_login_failed:
+            self._claude_login_failed = True
+            self._claude_status_checked = True
+            await self._record_status(
+                "paused", f"Claude isn't signed in ({error.strip()[:200]}). {CLAUDE_LOGIN_HELP}",
+                kind="auth")
+
+    async def _claude_login_ok(self):
+        """A Claude call worked: clear a login pause, including one an
+        earlier run stored before the operator signed in again."""
+        if self._claude_login_failed:
+            self._claude_login_failed = False
+            logger.info("Claude is signed in again; resuming.")
+            await self._record_status("ok", "")
+            return
+        if self._claude_status_checked or self.state is None:
+            return
+        self._claude_status_checked = True
+        try:
+            stored = parse_brain_status(await self.state.get_setting(BRAIN_STATUS_KEY))
+        except Exception:
+            return
+        if (stored.get("provider") == "claude" and stored.get("status") == "paused"
+                and stored.get("kind") == "auth"):
+            await self._record_status("ok", "")
+
     async def _record_status(self, status: str, reason: str, **extra):
         try:
             await self.state.set_setting(BRAIN_STATUS_KEY, json.dumps({
@@ -379,16 +427,16 @@ class Brain:
                     continue  # retry
 
                 if process.returncode != 0:
-                    error = stderr.decode(errors="replace").strip()
+                    # With JSON output the CLI puts its error on stdout.
+                    error = (stderr.decode(errors="replace").strip()
+                             or (stdout or b"").decode(errors="replace").strip())
+                    text, _ = self._parse_result_payload(error)
                     logger.error(
-                        f"Claude exited with code {process.returncode}: {error[:300]}"
+                        f"Claude exited with code {process.returncode}: {text[:300]}"
                     )
-                    last_error = error
-                    if any(p in error.lower() for p in _NON_RETRYABLE_PATTERNS):
-                        logger.error(
-                            "Non-retryable Claude error (auth). "
-                            "Run 'claude login' and restart Sellbird."
-                        )
+                    last_error = text
+                    if _is_login_error(text):
+                        await self._claude_login_problem(text)
                         return ""
                     continue  # retry transient failures
 
@@ -413,9 +461,13 @@ class Brain:
                     # other transient failure.
                     logger.error(f"Claude reported an error: {response[:300]}")
                     last_error = response
+                    if _is_login_error(response):
+                        await self._claude_login_problem(response)
+                        return ""
                     continue
 
                 logger.debug(f"Brain response: {response[:200]}...")
+                await self._claude_login_ok()
                 return response
 
             except FileNotFoundError:

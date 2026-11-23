@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+from types import SimpleNamespace
 import shutil
 import signal
 import stat
@@ -2434,6 +2435,27 @@ async def get_today():
                            " Replies and queued emails are untouched; Sellbird resumes "
                            "once it's fixed. sellbird status --check says what's wrong."),
                 "action": "Open the log", "tab": "controls",
+            })
+
+        # A verifier that rejects its key or is out of credits looks like one
+        # that found nothing: every new email stays an unsendable guess.
+        from sellbird import verifier_health
+        env_vars = _read_env_file()
+        verifier_keys = SimpleNamespace(**{
+            k.lower(): (env_vars.get(k, "") or os.getenv(k, ""))
+            for k in ("REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY")})
+        verifier_state, verifier_detail = verifier_health.describe(
+            verifier_health.parse(await state.get_setting(verifier_health.VERIFIER_STATUS_KEY)),
+            verifier_keys)
+        waiting_check = await state.count_recheckable_emails()
+        if verifier_state == "FAILING" or (verifier_state == "NONE" and waiting_check):
+            items.append({
+                "key": "verifier", "tone": "bad" if verifier_state == "FAILING" else "warn",
+                "title": (f"The email verifier isn't working; {waiting_check} guessed "
+                          "email(s) are waiting" if verifier_state == "FAILING" else
+                          f"{waiting_check} email(s) can't be checked: no verifier key"),
+                "detail": verifier_detail[:400],
+                "action": "Open settings", "tab": "settings",
             })
 
         from sellbird.agents.writer import EMAIL_RULES_PROBLEM_KEY

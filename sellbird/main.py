@@ -20,6 +20,8 @@ from sellbird.pidfile import (
     LOCK_FILE, hold_loop_lock, read_pid, release_loop_lock, remove_pid_file, write_pid_file,
 )
 from sellbird.pipeline import run_profile_stage
+from sellbird import verifier_health
+from sellbird.recheck import recheck_guessed_emails
 from sellbird.state import StateManager
 
 logging.basicConfig(
@@ -142,12 +144,15 @@ def unusable_backlog_notice(summary: dict) -> str:
     recent = summary.get("recent_unusable_prospects", 0) or 0
     if writable or recent < PROSPECT_BACKLOG:
         return ""
+    verifier = summary.get("verifier_problem") or ""
+    why = (f"The email verifier isn't working ({verifier}). " if verifier else
+           "Add an email verifier key (REOON_API_KEY, ZEROBOUNCE_API_KEY or "
+           "HUNTER_API_KEY in .env) or check it still has credits. ")
     return (
         f"Sellbird found {recent} prospects in the last day, but none has a verified "
         "or catch-all email, so it paused prospecting for about a day to save search "
-        "and verifier credits. Add an email verifier key (REOON_API_KEY, "
-        "ZEROBOUNCE_API_KEY or HUNTER_API_KEY in .env) or check it still has credits. "
-        "`sellbird export --all` exports the list as it is."
+        f"and verifier credits. {why}Guessed emails are checked again once a "
+        "verifier works. `sellbird export --all` exports the list as it is."
     )
 
 
@@ -402,6 +407,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             else:
                 logger.info("Checking pipeline state...")
                 summary = await state.get_state_summary()
+                summary["verifier_problem"] = verifier_health.problem(
+                    verifier_health.snapshot(env))
                 action = await decide_next_action(brain, state, config, summary=summary)
 
             # 5. Execute — run independent agents in parallel where possible
@@ -441,7 +448,14 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if summary.get("unprofiled", 0):
                 tasks.append(("profile", run_profile_stage(state, limit=25, config=config)))
 
+            # Guessed emails get another check while a verifier works: one
+            # found during an outage would otherwise stay unsendable for good.
+            if (action in ("prospect", "idle") and summary.get("recheckable_emails", 0)
+                    and verifier_health.ready(env)):
+                tasks.append(("recheck_emails", recheck_guessed_emails(state, env)))
+
             outcomes = await _run_agents(tasks)
+            await verifier_health.save(state, env)
 
             # Phase 2: send — only after every reply-reading task this cycle
             # finished reading and handling replies (it returns True; a

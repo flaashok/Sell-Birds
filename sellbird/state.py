@@ -558,6 +558,12 @@ MIGRATIONS: list[str] = [
     ALTER TABLE conversations ADD COLUMN mailbox_id TEXT DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_outbox_mailbox_sent ON outbox(mailbox_id, status, sent_at);
     """,
+    # ── v17: when a guessed email was last re-checked ──
+    # A guess is checked again once a verifier works (one may have been down
+    # or out of credits when the prospect was found). NULL: never re-checked.
+    """
+    ALTER TABLE prospects ADD COLUMN email_checked_at TIMESTAMP DEFAULT NULL;
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -2306,6 +2312,51 @@ class StateManager:
             ) as cursor:
                 return (await cursor.fetchone())[0]
 
+    # A guess whose re-check was inconclusive waits this long for another.
+    RECHECK_AFTER_DAYS = 14
+
+    def _recheckable_sql(self) -> tuple[str, tuple]:
+        since = (_utcnow() - timedelta(days=self.RECHECK_AFTER_DAYS)).isoformat()
+        return (f"""FROM prospects p
+                    WHERE status = 'new' AND COALESCE(email, '') != ''
+                      AND COALESCE(email_status, '') IN ('guess', '')
+                      AND (email_checked_at IS NULL
+                           OR datetime(email_checked_at) < datetime(?))
+                      AND NOT {_company_answered('p')}""", (since,))
+
+    async def count_recheckable_emails(self) -> int:
+        """New prospects whose email is still a guess and due a re-check."""
+        where, params = self._recheckable_sql()
+        async with self._connect() as db:
+            async with db.execute(f"SELECT COUNT(*) {where}", params) as cursor:
+                return (await cursor.fetchone())[0]
+
+    async def recheckable_emails(self, limit: int) -> list[dict]:
+        """The guessed emails to re-check next: highest score, then newest."""
+        where, params = self._recheckable_sql()
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT p.id, p.email {where} "
+                "ORDER BY p.score DESC, p.created_at DESC LIMIT ?", (*params, limit),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
+    async def set_email_check(self, prospect_id: str, status: str):
+        """Record a re-check: the new status if it decided one, and when."""
+        now = _utcnow().isoformat()
+        async with self._connect() as db:
+            if status in ("verified", "risky", "invalid"):
+                await db.execute(
+                    "UPDATE prospects SET email_status = ?, email_verified = ?, "
+                    "email_checked_at = ?, updated_at = ? WHERE id = ?",
+                    (status, 1 if status == "verified" else 0, now, now, prospect_id))
+            else:
+                await db.execute(
+                    "UPDATE prospects SET email_checked_at = ? WHERE id = ?",
+                    (now, prospect_id))
+            await db.commit()
+
     async def count_recent_unusable_prospects(self, hours: int = 24) -> int:
         """New prospects found in the last ``hours`` that the Writer can't use."""
         since = (_utcnow() - timedelta(hours=hours)).isoformat()
@@ -2796,6 +2847,8 @@ class StateManager:
             # Unusable ones found in the last day: the heartbeat pauses
             # prospecting for the day when these alone fill the backlog.
             "recent_unusable_prospects": await self.count_recent_unusable_prospects(),
+            # Guessed emails a working verifier would check again.
+            "recheckable_emails": await self.count_recheckable_emails(),
             "draft_campaigns": draft_campaigns,
             "active_campaigns": active_campaigns,
             # The kill switch: native sending stages nothing while it's set.

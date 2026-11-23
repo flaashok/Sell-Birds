@@ -32,12 +32,17 @@ import dns.resolver
 import aiosmtplib
 import httpx
 
+from sellbird import verifier_health
+
 logger = logging.getLogger("sellbird.email_finder")
 
 # Cache MX host + type per domain to avoid repeated lookups.
 _mx_cache: dict[str, Optional[str]] = {}
 
 API_TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
+# A verifier waits on the recipient's mail server, and a slow one takes 30
+# seconds or more; giving up at 20 threw those checks (and credits) away.
+VERIFY_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
 
 # Named email-format patterns → builder. {f}=first, {l}=last, {fi}=first initial,
 # {li}=last initial. Ordered by real-world prevalence for the default fallback.
@@ -535,15 +540,18 @@ async def verify_reoon(email: str, api_key: str) -> Optional[dict]:
     only when Reoon also reports it deliverable.
     """
     try:
-        async with httpx.AsyncClient(timeout=API_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=VERIFY_TIMEOUT) as client:
             resp = await client.get(
                 "https://emailverifier.reoon.com/api/v1/verify",
                 params={"email": email, "key": api_key, "mode": "power"},
             )
+    except httpx.TimeoutException:
+        verifier_health.note_timeout("reoon")
+        return None
     except httpx.HTTPError as e:
         logger.debug(f"Reoon request failed for {email}: {_redact(e, api_key)}")
         return None
-    if resp.status_code != 200:
+    if not verifier_health.note_response("reoon", resp):
         return None
     try:
         data = resp.json()
@@ -552,24 +560,63 @@ async def verify_reoon(email: str, api_key: str) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
     status = str(data.get("status") or "").lower()
+    if status == "error":
+        verifier_health.note_failure("reoon", str(data.get("reason") or "error")[:200])
+        return None
+    verifier_health.note_ok("reoon")
     if status == "role_account":
         status = "valid" if data.get("is_deliverable") is True else "unknown"
     is_catch_all = bool(data.get("is_catch_all") or status == "catch_all")
     return {"status": status, "catch_all": is_catch_all}
 
 
+async def reoon_credits(api_key: str) -> Optional[int]:
+    """Reoon credits left (daily plus instant), or None if it can't say.
+    Free: it spends nothing, so it's how Sellbird notices credits are back."""
+    try:
+        async with httpx.AsyncClient(timeout=API_TIMEOUT) as client:
+            resp = await client.get(
+                "https://emailverifier.reoon.com/api/v1/check-account-balance/",
+                params={"key": api_key},
+            )
+    except httpx.HTTPError as e:
+        logger.debug(f"Reoon balance check failed: {_redact(e, api_key)}")
+        return None
+    if not verifier_health.note_response("reoon", resp):
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("status") != "success":
+        return None
+    try:
+        left = int(data.get("remaining_daily_credits") or 0) + \
+            int(data.get("remaining_instant_credits") or 0)
+    except (TypeError, ValueError):
+        return None
+    if left <= 0:
+        verifier_health.note_failure("reoon", "no credits left (daily credits renew each day)")
+    else:
+        verifier_health.note_ok("reoon")
+    return left
+
+
 async def verify_zerobounce(email: str, api_key: str) -> Optional[dict]:
     """ZeroBounce — its 2026 engine is the reliable one for M365/Workspace catch-alls."""
     try:
-        async with httpx.AsyncClient(timeout=API_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=VERIFY_TIMEOUT) as client:
             resp = await client.get(
                 "https://api.zerobounce.net/v2/validate",
                 params={"email": email, "api_key": api_key},
             )
+    except httpx.TimeoutException:
+        verifier_health.note_timeout("zerobounce")
+        return None
     except httpx.HTTPError as e:
         logger.debug(f"ZeroBounce request failed for {email}: {_redact(e, api_key)}")
         return None
-    if resp.status_code != 200:
+    if not verifier_health.note_response("zerobounce", resp):
         return None
     try:
         data = resp.json()
@@ -577,6 +624,11 @@ async def verify_zerobounce(email: str, api_key: str) -> Optional[dict]:
         return None
     if not isinstance(data, dict):
         return None
+    if data.get("error"):
+        # Out of credits and a bad key come back as HTTP 200 with an error.
+        verifier_health.note_failure("zerobounce", str(data["error"])[:200])
+        return None
+    verifier_health.note_ok("zerobounce")
     status = str(data.get("status") or "").lower()
     sub = str(data.get("sub_status") or "").lower()
     return {"status": status, "catch_all": sub == "catch-all" or status == "catch-all"}
@@ -584,21 +636,27 @@ async def verify_zerobounce(email: str, api_key: str) -> Optional[dict]:
 
 async def verify_hunter(email: str, api_key: str) -> Optional[dict]:
     try:
-        async with httpx.AsyncClient(timeout=API_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=VERIFY_TIMEOUT) as client:
             resp = await client.get(
                 "https://api.hunter.io/v2/email-verifier",
                 params={"email": email},
                 headers=_hunter_headers(api_key),
             )
+    except httpx.TimeoutException:
+        verifier_health.note_timeout("hunter")
+        return None
     except httpx.HTTPError as e:
         logger.debug(f"Hunter verify failed for {email}: {_redact(e, api_key)}")
         return None
-    if resp.status_code != 200:
+    if resp.status_code == 202:
+        return None  # still checking on Hunter's side: inconclusive, not broken
+    if not verifier_health.note_response("hunter", resp):
         return None
     try:
         data = (resp.json() or {}).get("data") or {}
     except ValueError:
         return None
+    verifier_health.note_ok("hunter")
     status = str(data.get("status") or data.get("result") or "").lower()
     return {"status": status, "catch_all": bool(data.get("accept_all"))}
 

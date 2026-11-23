@@ -225,6 +225,22 @@ def cmd_status(args):
         print(f"  Prospects:            {summary['prospects']}")
         print(f"  Ready to write for:   {summary.get('writable_prospects', 0)} "
               "(new, with a verified or catch-all email)")
+        from sellbird import verifier_health
+        from sellbird.config import load_env
+        try:
+            env = load_env()
+        except Exception:
+            env = None
+        verifier_state, verifier_detail = verifier_health.describe(
+            verifier_health.parse(await state.get_setting(verifier_health.VERIFIER_STATUS_KEY)),
+            env)
+        print(f"  Email verifier:       {verifier_state}")
+        print(textwrap.fill(verifier_detail, width=72, initial_indent="                        ",
+                            subsequent_indent="                        "))
+        recheck = summary.get("recheckable_emails", 0)
+        if recheck:
+            print(f"  Guessed emails:       {recheck} waiting for a verifier check "
+                  "(never sent as guesses)")
         write_failed = (summary.get("prospects") or {}).get("write_failed", 0)
         if write_failed:
             print(f"  Couldn't write for:   {write_failed} (the model's drafts kept coming back "

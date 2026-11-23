@@ -598,6 +598,50 @@ tr:focus-within .row-action { opacity: 1; }
 .figure .v.zero { color: var(--text-3); font-weight: 400; }
 .figure-note { font-size: var(--fs-caption); color: var(--text-3); margin-top: 8px; }
 
+/* Pipeline (Today): the loop's state on top, then one row per stage. */
+.sched { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); padding-bottom: var(--sp-3); border-bottom: 1px solid var(--line); }
+.sched-main { min-width: 0; }
+.sched-title { display: flex; align-items: flex-start; gap: 10px; line-height: 1.4; font-size: 1.125rem; font-weight: 600; letter-spacing: -0.01em; }
+.sched-title > span:last-child { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.sched-next { font-size: var(--fs-ui); font-weight: 500; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.sched-title > .sched-dot, .sched-title > .pulse { margin-top: calc(0.7em - 5px); }
+.sched-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--text-3); }
+.sched-dot.waiting { background: var(--wait); box-shadow: 0 0 0 4px var(--wait-bg); }
+.sched-dot.bad { background: var(--bad); box-shadow: 0 0 0 4px var(--bad-bg); }
+.sched.is-off .sched-dot { background: transparent; box-shadow: inset 0 0 0 2px var(--line-strong); }
+.sched-reason { font-size: var(--fs-ui); color: var(--text-2); margin-top: 4px; max-width: 62ch; }
+.sched.tone-bad .sched-reason { color: var(--bad); }
+.sched-meta { font-size: var(--fs-caption); color: var(--text-3); margin-top: 2px; }
+.pipe-jobs { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: var(--sp-3); }
+.pipe-table { margin-top: var(--sp-2); }
+.pipe-row {
+  display: grid; grid-template-columns: minmax(150px, 1.5fr) 128px minmax(96px, 1fr) minmax(96px, 1fr) minmax(76px, .8fr) minmax(76px, .8fr);
+  gap: 4px var(--sp-3); align-items: start; padding: 10px 0; font-size: var(--fs-ui);
+}
+.pipe-row + .pipe-row { border-top: 1px solid var(--line); }
+.pipe-headrow { font-size: var(--fs-caption); color: var(--text-3); padding: 8px 0 6px; }
+.pipe-name { min-width: 0; display: flex; flex-direction: column; }
+.pipe-name .pipe-label { font-weight: 500; color: var(--text); }
+.pipe-sub { display: block; font-size: var(--fs-caption); color: var(--text-3); margin-top: 1px; overflow-wrap: anywhere; }
+.pipe-cell { min-width: 0; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.pipe-cell b { color: var(--text); font-weight: 600; }
+.pipe-cell b.zero { color: var(--text-3); font-weight: 500; }
+.pipe-bad, .pipe-cell .pipe-bad { color: var(--bad); }
+.pipe-ok { color: var(--accent); }
+.pipe-row.is-off .pipe-name .pipe-label { color: var(--text-2); }
+@media (max-width: 900px) {
+  .pipe-headrow { display: none; }
+  .pipe-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .pipe-state { justify-self: end; }
+  .pipe-cell { display: flex; justify-content: space-between; gap: var(--sp-3); grid-column: 1 / -1; font-size: var(--fs-caption); }
+  .pipe-cell::before { content: attr(data-label); color: var(--text-3); flex: none; }
+  .pipe-val { text-align: right; min-width: 0; }
+}
+.disc-kpis .kpi.is-text .kpi-value { font-size: 1.375rem; }
+.disc-kpis .kpi.is-live { box-shadow: var(--shadow-border), inset 0 0 0 1px var(--accent-line); }
+.disc-kpis .kpi .pulse { margin-left: 2px; }
+.disc-note { margin: calc(-1 * var(--sp-3)) 0 var(--sp-5); }
+
 .runs { display: flex; flex-direction: column; }
 .run { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 10px 0; align-items: center; }
 .run + .run { border-top: 1px solid var(--line); }

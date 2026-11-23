@@ -19,6 +19,7 @@ from sellbird.integrations.mail_provider import NATIVE_PROVIDERS
 from sellbird.pidfile import (
     LOCK_FILE, hold_loop_lock, read_pid, release_loop_lock, remove_pid_file, write_pid_file,
 )
+from sellbird import loop_status
 from sellbird.pipeline import run_profile_stage
 from sellbird.state import StateManager
 
@@ -171,7 +172,16 @@ async def decide_next_action(
     """
     if summary is None:
         summary = await state.get_state_summary()
+    action, reason = choose_action(config, summary)
+    if action == "idle":
+        logger.warning(unusable_backlog_notice(summary))
+    logger.info(f"Decision: {action} ({reason})")
+    return action
 
+
+def choose_action(config, summary: dict) -> tuple[str, str]:
+    """The cycle's main job and why, from pipeline counts alone (no model
+    call, nothing logged), so the dashboard can say what runs next."""
     # Only prospects the Writer can draft for trigger writing: one with a
     # guessed email stays 'new' for good, and counting it starved Scout.
     new_prospects, writable = _new_counts(summary)
@@ -195,12 +205,9 @@ async def decide_next_action(
         action, reason = "write_campaign", f"{writable} new prospect(s) with no drafts ready"
     elif unusable_backlog_notice(summary):
         action, reason = "idle", "a day's worth of prospects with no usable email"
-        logger.warning(unusable_backlog_notice(summary))
     else:
         action, reason = "prospect", f"{new_prospects} new prospect(s), none ready to write for"
-
-    logger.info(f"Decision: {action} ({reason})")
-    return action
+    return action, reason
 
 
 async def _run_agents(tasks: list) -> dict:
@@ -336,6 +343,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if quiet and not send_only:
                 sleep_for = seconds_until_quiet_hours_end(config)
                 logger.info(f"Quiet hours. Sleeping for {sleep_for // 60} minutes.")
+                await loop_status.note_loop(state, loop_status.QUIET_HOURS, seconds=sleep_for,
+                                            interval_minutes=config.usage.heartbeat_interval_minutes)
                 # Sleep in short polled chunks rather than one multi-hour
                 # wait: found in production that a system sleep/wake cycle
                 # during a long asyncio.wait_for left the process silently
@@ -361,6 +370,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     f"Quiet hours. No cold email can go now; checking again in "
                     f"{config.usage.heartbeat_interval_minutes} minutes."
                 )
+                await loop_status.note_loop(
+                    state, loop_status.QUIET_HOURS, seconds=interval,
+                    note="Quiet hours. It only sends what is due in each recipient's own "
+                         "hours, and nothing is due yet.",
+                    interval_minutes=config.usage.heartbeat_interval_minutes)
                 if await _interruptible_sleep(interval, stop_event):
                     break
                 continue
@@ -375,6 +389,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     f"Sellbird is paused: {problem} Nothing was sent or changed. "
                     f"Re-checking in {config.usage.heartbeat_interval_minutes} minutes."
                 )
+                await loop_status.note_loop(state, loop_status.PAUSED, seconds=interval,
+                                            note=f"Paused: {problem}",
+                                            interval_minutes=config.usage.heartbeat_interval_minutes)
                 if await _interruptible_sleep(interval, stop_event):
                     break
                 continue
@@ -389,6 +406,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     f"({config.usage.max_daily_claude_percent}% of quota or "
                     f"{max_calls} calls). Sleeping 1h, then re-checking."
                 )
+                await loop_status.note_loop(state, loop_status.USAGE_LIMIT, seconds=3600,
+                                            interval_minutes=config.usage.heartbeat_interval_minutes)
                 if await _interruptible_sleep(3600, stop_event):
                     break
                 continue
@@ -403,6 +422,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 logger.info("Checking pipeline state...")
                 summary = await state.get_state_summary()
                 action = await decide_next_action(brain, state, config, summary=summary)
+            await loop_status.note_loop(state, loop_status.WORKING, action=action,
+                                        interval_minutes=config.usage.heartbeat_interval_minutes)
 
             # 5. Execute — run independent agents in parallel where possible
             # Handler is always safe to run alongside other agents
@@ -441,7 +462,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if summary.get("unprofiled", 0):
                 tasks.append(("profile", run_profile_stage(state, limit=25, config=config)))
 
-            outcomes = await _run_agents(tasks)
+            outcomes = await _run_agents(
+                [(name, loop_status.timed(state, name, coro)) for name, coro in tasks])
 
             # Phase 2: send — only after every reply-reading task this cycle
             # finished reading and handling replies (it returns True; a
@@ -463,7 +485,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                         await record_send_phase(state, held)
                 else:
                     await record_send_phase(state, send_hold_reason([], "", ""))
-                    await _run_agents([(name, run()) for name, run in send_tasks])
+                    await _run_agents([(name, loop_status.timed(state, name, run()))
+                                       for name, run in send_tasks])
 
             # 6. Log the action (best-effort; never kills the loop)
             try:
@@ -481,6 +504,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             logger.info(
                 f"Cycle complete. Sleeping for {config.usage.heartbeat_interval_minutes} minutes."
             )
+            await loop_status.note_loop(state, loop_status.SLEEPING, seconds=interval,
+                                        cycle_done=True,
+                                        interval_minutes=config.usage.heartbeat_interval_minutes)
             if await _interruptible_sleep(interval, stop_event):
                 break
 
@@ -497,9 +523,12 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 exc_info=True,
             )
             logger.info(f"Recovering... sleeping {backoff}s before retry.")
+            await loop_status.note_loop(state, loop_status.ERROR, seconds=backoff,
+                                        note=str(e)[:300])
             if await _interruptible_sleep(backoff, stop_event):
                 break
 
+    await loop_status.note_loop(state, loop_status.STOPPED)
     logger.info("Sellbird shutting down. Deals don't close themselves, but I need a break.")
 
 

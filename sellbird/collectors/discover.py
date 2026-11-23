@@ -21,6 +21,7 @@ already learned.
 """
 
 import asyncio
+import json
 import time
 import base64
 import logging
@@ -34,6 +35,7 @@ from urllib.parse import urlparse
 import httpx
 
 from sellbird.models import Company
+from sellbird.paths import PROJECT_ROOT
 
 logger = logging.getLogger("sellbird.collectors.discover")
 
@@ -856,6 +858,44 @@ class Serper(DiscoveryProvider):
         return out
 
 
+# Where each process notes the searches it made in the last hour, so the
+# dashboard can show when an hourly allowance frees up again. Display only:
+# the pacing above still counts per process.
+SEARCH_LOG = PROJECT_ROOT / "data" / "search-hour.json"
+
+
+def note_search(provider: str, path=None, now: float | None = None) -> None:
+    path = path or SEARCH_LOG
+    now = time.time() if now is None else now
+    try:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        recent = [t for t in data.get(provider, []) if isinstance(t, (int, float)) and now - t < 3600]
+        data[provider] = recent + [now]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def searches_this_hour(provider: str, path=None, now: float | None = None) -> list[float]:
+    """The provider's searches in the last hour, oldest first, across processes."""
+    path = path or SEARCH_LOG
+    now = time.time() if now is None else now
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    times = data.get(provider, []) if isinstance(data, dict) else []
+    return sorted(t for t in times if isinstance(t, (int, float)) and now - t < 3600)
+
+
 class TinyFish(DiscoveryProvider):
     """TinyFish web search: free with a key, at 30 searches a minute and
     500 an hour. Results are TinyFish's own ordering for the phrase, from
@@ -908,6 +948,7 @@ class TinyFish(DiscoveryProvider):
                 await asyncio.sleep(wait)
             self._last_call = time.monotonic()
             self._calls.append(self._last_call)
+            note_search(self.key)
 
     def estimate(self, queries: list[DiscoveryQuery]) -> float:
         return 0.0

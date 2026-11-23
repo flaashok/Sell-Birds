@@ -413,7 +413,7 @@ function showTab(id, btn) {
 
 function loadCurrentTab() {
   switch (currentTab) {
-    case 'today': loadLiveStatus(); loadRenameNotice(); loadToday(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
+    case 'today': loadLiveStatus(); loadRenameNotice(); loadToday(); loadTrend(); loadFunnel(); loadSetupStatus(); loadTodayActivity(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
@@ -476,55 +476,148 @@ async function loadToday() {
   }).join('') + '</div>';
 }
 
-// ── Live status: the "what's happening?" answer, kept on screen ──
+// ── Pipeline: is the background loop running, waiting or off, and each stage ──
+
+const STAGE_STATE = {
+  running:   ['Running', 'active'],
+  scheduled: ['Scheduled', 'idle'],
+  manual:    ['When you start it', 'idle'],
+  your_turn: ['Waiting on you', 'waiting'],
+  clear:     ['Nothing waiting', 'idle'],
+  paused:    ['Paused', 'waiting'],
+  off:       ['Off', 'idle'],
+};
+
+// "in 8 min", "in 1 h 5 min", "in 42 s": the countdown on the page.
+function countdown(iso) {
+  const ms = parseTs(iso) - Date.now();
+  if (isNaN(ms)) return '';
+  if (ms <= 0) return 'any moment now';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return 'in ' + s + ' s';
+  const m = Math.floor(s / 60), sec = s % 60;
+  if (m < 60) return 'in ' + m + ' min' + (m < 10 ? ' ' + String(sec).padStart(2, '0') + ' s' : '');
+  return 'in ' + Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
+}
+
+function clockTime(iso) {
+  const d = parseTs(iso);
+  return isNaN(d) ? '' : d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+}
+
+function tickCountdowns() {
+  document.querySelectorAll('[data-countdown]').forEach(el => {
+    el.textContent = countdown(el.getAttribute('data-countdown'));
+  });
+}
+setInterval(() => { if (!document.hidden) tickCountdowns(); }, 1000);
+
+function schedulerHead(sc, hint) {
+  const dot = sc.state === 'running_now' ? '<span class="pulse"></span>' : '<span class="sched-dot ' + escHtml(sc.tone || 'idle') + '"></span>';
+  let title = escHtml(sc.label || '');
+  if (sc.state === 'waiting' && sc.next_at) {
+    title += '<span class="sched-next">Next run ' + '<span data-countdown="' + escHtml(sc.next_at) + '">' +
+      countdown(sc.next_at) + '</span> · ' + clockTime(sc.next_at) + '</span>';
+  }
+  const meta = [];
+  if (sc.last_cycle_at) meta.push('Last run finished ' + relTime(sc.last_cycle_at));
+  const action = sc.state === 'off'
+    ? '<button class="btn btn-primary btn-sm" onclick="startLoopFromToday(this)">Start</button>'
+    : '<button class="btn btn-ghost btn-sm" onclick="goTab(\'controls\')">Controls</button>';
+  return '<div class="sched is-' + escHtml(sc.state) + ' tone-' + escHtml(sc.tone || 'idle') + '">' +
+    '<div class="sched-main"><div class="sched-title">' + dot + '<span>' + title + '</span></div>' +
+      '<p class="sched-reason">' + mdCode(sc.reason || '') + '</p>' +
+      (meta.length ? '<p class="sched-meta">' + escHtml(meta.join(' · ')) + '</p>' : '') +
+    '</div>' + action + '</div>';
+}
+
+// `code` in a server sentence becomes <code>; everything else is escaped.
+function mdCode(text) {
+  return escHtml(text).replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function stageLast(st) {
+  if (!st.last_at) return '<span class="muted">Not yet</span>';
+  if (st.last_result === 'running') return '<span class="pipe-ok">Running since ' + relTime(st.last_at) + '</span>';
+  const bad = st.last_result && st.last_result !== 'ok';
+  return '<span class="' + (bad ? 'pipe-bad' : '') + '" title="' + escHtml(st.last_note || st.last_detail || '') + '">' +
+    (bad ? 'Failed ' : '') + relTime(st.last_at) + '</span>' +
+    (st.last_detail ? '<span class="pipe-sub">' + escHtml(st.last_detail) + '</span>' : '') +
+    (bad && st.last_note ? '<span class="pipe-sub pipe-bad">' + escHtml(st.last_note) + '</span>' : '');
+}
+
+function stageNext(st) {
+  if (st.next) return '<span data-countdown="' + escHtml(st.next) + '">' + countdown(st.next) + '</span>' +
+    '<span class="pipe-sub">' + clockTime(st.next) + '</span>';
+  return '<span class="muted">' + escHtml(st.next_note || '') + '</span>';
+}
+
+function stageRow(st) {
+  const meta = STAGE_STATE[st.state] || [st.state, 'idle'];
+  const num = (n, unit) => n === null || n === undefined ? '<span class="muted">·</span>'
+    : '<b class="' + (n ? '' : 'zero') + '">' + Number(n) + '</b> ' + escHtml(unit || '');
+  // On a phone each cell becomes a "label · value" line; the value stays one block.
+  const cell = (label, html) => '<div class="pipe-cell" data-label="' + label + '"><span class="pipe-val">' + html + '</span></div>';
+  const errs = st.errors_today ? '<span class="pipe-sub pipe-bad">' + Number(st.errors_today) + ' error' + (st.errors_today === 1 ? '' : 's') + '</span>' : '';
+  return '<div class="pipe-row is-' + escHtml(st.state) + '">' +
+    // The stage name is a label, not a link: the Next line below says where to go.
+    '<div class="pipe-name"><span class="pipe-label">' + escHtml(st.label) + '</span>' +
+      '<span class="pipe-sub">' + mdCode(st.how || '') + '</span></div>' +
+    '<div class="pipe-state"><span class="badge t-' + meta[1] + '">' + escHtml(meta[0]) + '</span></div>' +
+    cell('Last run', stageLast(st)) + cell('Next run', stageNext(st)) +
+    cell('Waiting', num(st.waiting, st.waiting_unit)) + cell('Today', num(st.done_today, st.done_unit) + errs) +
+  '</div>';
+}
 
 async function loadLiveStatus() {
   const el = document.getElementById('live-status');
   if (!el) return;
-  const d = await api('/api/live-status');
-  if (!d || !Array.isArray(d.steps)) {
+  const d = await api('/api/pipeline');
+  if (!d || !Array.isArray(d.stages)) {
     // Keep the last good numbers on screen, but never let them pass for live.
     const flag = el.querySelector('.live-flag');
-    if (flag) flag.textContent = "Can't reach Sellbird right now — numbers below may be old.";
+    if (flag) flag.textContent = "Can't reach Sellbird right now. The numbers below may be old.";
     else el.innerHTML = '<p class="muted live-flag">Can\'t reach Sellbird right now. ' +
       'Is the dashboard window still open?</p>';
     return;
   }
-  const glyph = {done: icon('check'), running: '<span class="pulse"></span>', partial: '', waiting: ''};
-  const fill = {done: 'var(--good)', running: 'var(--accent)', partial: 'var(--accent)', waiting: 'var(--line-strong)'};
-  const rows = d.steps.map(s => {
-    const st = Object.prototype.hasOwnProperty.call(glyph, s.state) ? s.state : 'waiting';
-    const pct = s.total ? Math.min(100, Math.round(100 * s.done / s.total)) : 0;
-    const bar = s.total
-      ? '<div class="bar"><span style="width:' + pct + '%;background:' + fill[st] + '"></span></div>'
-      : '';
-    return '<div class="step">' +
-      '<span class="step-icon ' + st + '">' + glyph[st] + '</span>' +
-      '<span class="step-label">' + escHtml(s.label) + '</span>' +
-      '<span class="step-detail">' + escHtml(s.detail) + '</span>' + bar +
-    '</div>';
-  }).join('');
   const jobName = r => r.stage === 'profile' ? 'Reading websites'
-    : r.stage === 'discover' ? 'Searching for businesses (' + (r.provider || '') + ')'
-    : String(r.stage || 'Job');
-  const running = d.running || [];
-  const runningHtml = running.length
-    ? running.map(r => '<span class="live-now"><span class="pulse"></span>' + escHtml(jobName(r)) +
-        ' · ' + r.elapsed_min + ' min' + (r.eta_text ? ' · ' + escHtml(r.eta_text) : '') + '</span>').join('')
-    : '<span class="live-now">Nothing running right now</span>';
-  const stoppedHtml = (d.stopped || []).length
+    : r.stage === 'discover' ? 'Finding businesses'
+    : String(r.stage || 'A job');
+  const jobs = (d.running || []).map(r => '<span class="live-now"><span class="pulse"></span>' + escHtml(jobName(r)) +
+    ' · ' + r.elapsed_min + ' min' + (r.eta_text ? ' · ' + escHtml(r.eta_text) : '') + '</span>').join('');
+  const stopped = (d.stopped || []).length
     ? '<div class="banner bad" style="margin:8px 0 0">' + icon('alert') + '<p style="color:inherit">' +
       (d.stopped || []).map(r => escHtml(jobName(r))).join(', ') + ' stopped before finishing.</p></div>'
     : '';
-  el.innerHTML =
-    '<div class="live-head">' + runningHtml +
-      '<span class="setup-pct">Cost so far $' + Number(d.cost_usd || 0).toFixed(2) + '</span></div>' +
-    stoppedHtml +
-    '<div class="steps">' + rows + '</div>' +
+  el.innerHTML = schedulerHead(d.scheduler || {}, d.start_hint) +
+    (jobs ? '<div class="pipe-jobs">' + jobs + '</div>' : '') + stopped +
+    '<div class="pipe-table" role="table" aria-label="Pipeline stages">' +
+      '<div class="pipe-row pipe-headrow" role="row"><div>Stage</div><div>Status</div><div>Last run</div>' +
+      '<div>Next run</div><div>Waiting</div><div>Today</div></div>' +
+      d.stages.map(stageRow).join('') + '</div>' +
     (d.next ? '<div class="live-next">' + icon('arrow') + '<span><b>Next</b> · ' + escHtml(d.next) + '</span>' +
       (d.next_tab ? '<button class="btn btn-secondary btn-sm" onclick="goTab(' + jsq(d.next_tab) + ')">Go</button>' : '') +
       '</div>' : '') +
-    '<div class="live-flag">Updated ' + new Date().toLocaleTimeString() + ' · refreshes every 10 seconds</div>';
+    '<div class="live-flag">Updated ' + new Date().toLocaleTimeString() + ' · refreshes every 10 seconds' +
+      (d.cost_usd ? ' · spent $' + Number(d.cost_usd).toFixed(2) + ' on searches so far' : '') + '</div>';
+}
+
+async function startLoopFromToday(btn) {
+  btn.disabled = true;
+  const data = await api('/api/sellbird/start', {method: 'POST'});
+  if (data && data.success) showToast('Sellbird started. It runs its first cycle now.', 'success');
+  else { showToast(failMsg(data, 'Could not start Sellbird.'), 'error'); btn.disabled = false; }
+  loadSellbirdStatus();
+  setTimeout(loadLiveStatus, 1500);
+}
+
+// One figure tile (Today's figures, Discover's summary). label, value and
+// note are HTML the caller has already escaped.
+function kpiTile(label, value, spark, note, cls) {
+  return '<div class="kpi' + (cls ? ' ' + cls : '') + '"><div class="kpi-label">' + label + '</div>' +
+    '<div class="kpi-main"><span class="kpi-value' + (value ? '' : ' zero') + '">' + value + '</span>' + (spark || '') + '</div>' +
+    '<span class="kpi-note">' + note + '</span></div>';
 }
 
 // KPI cards. Totals come from /api/today; the 14-day bars from /api/trend.
@@ -534,10 +627,7 @@ function renderFigures(stats) {
   const t = _trend || {};
   const sum = a => (a || []).reduce((x, y) => x + (Number(y) || 0), 0);
   const last7 = a => sum((a || []).slice(-7));
-  const card = (label, value, spark, note) =>
-    '<div class="kpi"><div class="kpi-label">' + label + '</div>' +
-    '<div class="kpi-main"><span class="kpi-value' + (value ? '' : ' zero') + '">' + value + '</span>' + spark + '</div>' +
-    '<span class="kpi-note">' + note + '</span></div>';
+  const card = kpiTile;
 
   // Instantly sends from its own servers, so the Outbox never sees them.
   const sent = stats.email_provider === 'instantly'
@@ -639,26 +729,6 @@ function goTab(id) {
   const btns = [...document.querySelectorAll('nav button')];
   const btn = btns.find(b => (b.getAttribute('onclick') || '').includes("'" + id + "'"));
   showTab(id, btn);
-}
-
-async function loadRuns() {
-  const el = document.getElementById('today-runs');
-  const block = document.getElementById('today-runs-block');
-  if (!el) return;
-  const runs = await api('/api/runs');
-  if (!Array.isArray(runs) || !runs.length) {
-    if (block) block.style.display = 'none';
-    el.innerHTML = '';
-    return;
-  }
-  if (block) block.style.display = '';
-  el.innerHTML = '<div class="runs">' + runs.slice(0, 5).map(r =>
-    '<div class="run">' +
-      '<span class="name">' + escHtml(r.stage) + '</span>' + badge(r.status) +
-      '<span class="when">' + relTime(r.started_at) + '</span>' +
-      '<span class="stats">' + (r.records || 0) + ' records · ' +
-        (r.cost_usd ? '$' + Number(r.cost_usd).toFixed(4) : 'free') + '</span>' +
-    '</div>').join('') + '</div>';
 }
 
 // ── Setup checklist (lives on Today, and disappears once it's done) ──
@@ -870,7 +940,51 @@ async function setSignals(codes, status) {
 let _provider = null;
 let _discoverPoll = null;
 
+// The tiles at the top of Discover: what's running (here or in a terminal),
+// the last run, what was found, and when the hourly allowance frees up.
+async function loadDiscoverSummary() {
+  const el = document.getElementById('discover-summary');
+  if (!el) return;
+  const d = await api('/api/discover/summary');
+  if (!d) { el.innerHTML = ''; return; }
+  const cur = d.current, last = d.last, lim = d.limit || {};
+  const prov = o => escHtml((o && (o.provider_label || o.provider)) || 'a search');
+  const now = cur
+    ? kpiTile((cur.stage === 'profile' ? 'Reading websites' : 'Searching') + ' <span class="pulse"></span>',
+        Number(cur.found || 0),
+        '',
+        (cur.stage === 'profile' ? 'sites read' : 'found so far with ' + prov(cur)) +
+        ' · started ' + relTime(cur.started_at) +
+        (cur.from === 'terminal' ? ' · <b>from a terminal</b>' : ''), 'is-live')
+    : kpiTile('Current run', 'Idle', '', 'Nothing is searching right now', 'is-text');
+  const ended = last ? ({completed: 'Finished', failed: 'Failed', stalled: 'Stopped', stopped: 'Stopped'}[last.status] || 'Ended') : '';
+  const lastTile = last
+    ? kpiTile('Last run', Number(last.found || 0), '',
+        'found with ' + prov(last) + ' · ' + relTime(last.ended_at || last.started_at) +
+        ' · <span class="' + (last.status === 'completed' ? '' : 'pipe-bad') + '"' +
+        (last.error ? ' title="' + escHtml(last.error) + '"' : '') + '>' + ended + '</span>' +
+        (last.cost_usd ? ' · $' + Number(last.cost_usd).toFixed(2) : ''))
+    : kpiTile('Last run', 'None yet', '', 'Run a search below to fill your list', 'is-text');
+  const found = kpiTile('Businesses found', Number(d.found_today || 0), '',
+    'today · <b>' + Number(d.found_total || 0) + '</b> in total');
+  let limit;
+  if (!lim.limited) {
+    limit = kpiTile('Hourly limit', 'None', '', prov(lim) + ' has no hourly cap', 'is-text');
+  } else if (lim.resets_at && lim.used) {
+    limit = kpiTile('Hourly limit', Number(lim.per_hour - lim.used), '',
+      'searches left · resets <span data-countdown="' + escHtml(lim.resets_at) + '">' +
+      countdown(lim.resets_at) + '</span> (' + clockTime(lim.resets_at) + ')');
+  } else {
+    limit = kpiTile('Hourly limit', Number(lim.per_hour || 0), '', 'searches left this hour');
+  }
+  el.innerHTML = '<div class="kpis disc-kpis">' + now + lastTile + found + limit + '</div>' +
+    (last && last.status !== 'completed' && last.error
+      ? '<div class="banner bad disc-note">' + icon('alert') + '<p style="color:inherit">Last run: ' + escHtml(last.error) + '</p></div>'
+      : '');
+}
+
 async function loadDiscoverProviders() {
+  loadDiscoverSummary();
   const el = document.getElementById('discover-providers');
   const data = await api('/api/discover/providers');
   if (!data || !data.providers) { el.innerHTML = offlineState(); return; }
@@ -1027,7 +1141,7 @@ function renderDiscoverResult(report, running) {
   if (running) {
     el.innerHTML = '<div class="card"><h2>Running…</h2>' +
       '<p class="muted" style="font-size:13px">Sellbird is working through the ' +
-      'queries. Results land in Companies, and the run log is on Today.</p></div>';
+      'queries. Results land in Companies, and the tiles above count them as they come.</p></div>';
     return;
   }
   if (!report) { el.innerHTML = ''; return; }
@@ -3095,7 +3209,6 @@ loadToday();
 loadTrend();
 loadFunnel();
 loadSetupStatus();
-loadRuns();
 loadTodayActivity();
 loadSellbirdStatus();
 
@@ -3125,7 +3238,7 @@ setInterval(async () => {
 setInterval(() => {
   if (document.hidden || _locked) return;
   switch (currentTab) {
-    case 'today': loadToday(); loadTrend(); loadFunnel(); loadRuns(); loadTodayActivity(); break;
+    case 'today': loadToday(); loadTrend(); loadFunnel(); loadTodayActivity(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;

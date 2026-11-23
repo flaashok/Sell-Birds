@@ -2022,6 +2022,76 @@ async def get_discovery_providers():
         return {"providers": [], "error": str(e)}
 
 
+def _provider_label(key: str) -> str:
+    """A search provider's name as Discover shows it ("TinyFish"), or the key."""
+    from sellbird.collectors.discover import PROVIDERS
+    provider = PROVIDERS.get(key or "")
+    return (provider.label if provider and provider.label else key) or ""
+
+
+@app.get("/api/discover/summary")
+async def get_discovery_summary():
+    """The tiles at the top of Discover: what's running now (from here or a
+    terminal), how the last run went, what was found, and when the search
+    provider's hourly allowance frees up. Read-only."""
+    from sellbird.collectors.discover import DEFAULT_PROVIDER, searches_this_hour
+
+    state = _state()
+    await state.init_db()
+    await state.sweep_stale_runs()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    here = bool(_discovery_task and not _discovery_task.done())
+    current = None
+    for run in await query_db("SELECT * FROM runs WHERE status = 'running' "
+                              "AND stage IN ('discover', 'profile') ORDER BY started_at DESC"):
+        started = _parse_ts(run.get("started_at"))
+        last = _parse_ts(await _first("SELECT MAX(observed_at) AS t FROM observations "
+                                      "WHERE run_id = ?", (run["id"],))) or started
+        if last and (now - last).total_seconds() > STALE_RUN_SECONDS:
+            continue
+        try:
+            params = json.loads(run.get("params_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            params = {}
+        current = {
+            "stage": run.get("stage"), "provider": run.get("provider") or "",
+            "provider_label": _provider_label(run.get("provider") or ""),
+            "started_at": _db_iso(run.get("started_at")),
+            "found": await _scalar("SELECT COUNT(DISTINCT company_id) FROM observations "
+                                   "WHERE run_id = ? AND COALESCE(company_id, '') != ''", (run["id"],)),
+            "queries": params.get("queries") if isinstance(params, dict) else None,
+            # The dashboard's own run, or one started with `sellbird discover`.
+            "from": "dashboard" if here else "terminal",
+        }
+        break
+    rows = await query_db("SELECT * FROM runs WHERE stage = 'discover' AND status != 'running' "
+                          "ORDER BY started_at DESC LIMIT 1")
+    last = None
+    if rows:
+        r = rows[0]
+        last = {"started_at": _db_iso(r.get("started_at")), "ended_at": _db_iso(r.get("ended_at")),
+                "provider": r.get("provider") or "",
+                "provider_label": _provider_label(r.get("provider") or ""),
+                "found": int(r.get("records") or 0),
+                "status": r.get("status") or "", "error": (r.get("error") or "")[:300],
+                "cost_usd": float(r.get("cost_usd") or 0)}
+    provider = await state.get_setting("discovery_provider") or DEFAULT_PROVIDER
+    limit = {"provider": provider, "provider_label": _provider_label(provider), "limited": False}
+    if provider == "tinyfish":
+        times = searches_this_hour("tinyfish")
+        limit = limit | {"limited": True, "per_hour": 500, "used": len(times),
+                 "resets_at": (datetime.fromtimestamp(times[0] + 3600, timezone.utc)
+                               .strftime("%Y-%m-%dT%H:%M:%SZ") if times else "")}
+    return {
+        "current": current, "last": last,
+        "found_today": await _scalar("SELECT COUNT(*) FROM companies "
+                                     "WHERE datetime(created_at) >= datetime(?)",
+                                     (_local_day_start_utc(),)),
+        "found_total": await _scalar("SELECT COUNT(*) FROM companies"),
+        "limit": limit,
+    }
+
+
 @app.post("/api/discover/estimate")
 async def estimate_discovery(request: Request):
     """Projected spend and the exact query list, before anything is called."""
@@ -2364,6 +2434,267 @@ async def get_live_status():
         "updated_at": now.isoformat() + "Z",
     }
 
+
+# ── Pipeline: is the loop running, waiting or off, and each stage's state ──
+
+LOOP_START_HINT = ("Choose Start on Controls, or run `sellbird run` in a terminal and leave it "
+                   "open. It finds emails, writes, sends and reads replies on its own.")
+
+
+def _loop_started_at(pid: int | None) -> datetime | None:
+    """When the running loop started: the dashboard knows for one it started,
+    and the PID file's time tells for one started in a terminal."""
+    if not pid:
+        return None
+    if _sellbird_started_at and _sellbird_process and _sellbird_process.pid == pid:
+        return _sellbird_started_at.astimezone(timezone.utc)
+    try:
+        return datetime.fromtimestamp(PID_FILE.stat().st_mtime, timezone.utc)
+    except OSError:
+        return None
+
+
+def _local_day_start_utc(now: datetime | None = None) -> str:
+    """Local midnight today, as the database's naive UTC text."""
+    local = (now or datetime.now(timezone.utc)).astimezone()
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _db_iso(text) -> str:
+    """A stored naive UTC time as ISO with a Z, so the page reads it right."""
+    dt = _parse_ts(text)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else ""
+
+
+async def _predicted_action() -> str:
+    """What the loop's next cycle will choose, by the same rules it uses."""
+    try:
+        from sellbird.config import load_config
+        from sellbird.main import choose_action
+        summary = await _state().get_state_summary()
+        return choose_action(load_config(str(_resolve_config_file())), summary)[0]
+    except Exception:
+        return ""
+
+
+@app.get("/api/pipeline")
+async def get_pipeline():
+    """Whether the background loop is running now, waiting (until when) or
+    off, and each stage of the pipeline in plain words: is it running, when
+    it last ran and runs next, what's waiting for it, what it did today and
+    what went wrong. Read-only, and true whatever started the work."""
+    from sellbird import loop_status as ls
+
+    state = _state()
+    await state.init_db()
+    pid = _check_sellbird_pid()
+    loop = await ls.read_loop(state)
+    sched = ls.scheduler_view(loop, running=pid is not None, started_at=_loop_started_at(pid))
+    sched["pid"] = pid
+    on = pid is not None
+    live = await get_live_status()
+    steps = {s["label"]: s for s in live.get("steps", [])}
+    today = _local_day_start_utc()
+    day = datetime.now().astimezone().date().isoformat()
+    paused = await state.get_setting("sending_paused") or ""
+    action = await _predicted_action() if on else ""
+
+    async def stage_rec(*names):
+        return ls.merge_stages([await ls.read_stage(state, n) for n in names], day)
+
+    async def last_run(stage):
+        rows = await query_db("SELECT * FROM runs WHERE stage = ? ORDER BY started_at DESC LIMIT 1",
+                              (stage,))
+        return rows[0] if rows else None
+
+    async def failed_runs(stage):
+        return await _scalar(
+            "SELECT COUNT(*) FROM runs WHERE stage = ? AND status IN ('failed', 'stalled') "
+            "AND datetime(started_at) >= datetime(?)", (stage, today))
+
+    def latest(*pairs):
+        """The later of several (time, how-it-ended, note) answers."""
+        pairs = [p for p in pairs if p and p[0]]
+        return max(pairs, key=lambda p: p[0]) if pairs else ("", "", "")
+
+    def loop_last(rec):
+        if not rec:
+            return None
+        if rec.get("running"):
+            return (rec.get("last_started", ""), "running", "")
+        return (rec.get("last_started", ""), "ok" if rec.get("ok", True) else "error",
+                rec.get("error", ""))
+
+    def run_last(run):
+        if not run:
+            return None
+        status = run.get("status") or ""
+        ended = {"completed": "ok", "running": "running"}.get(status, "error" if status in (
+            "failed", "stalled") else status)
+        return (_db_iso(run.get("started_at")), ended, run.get("error") or "")
+
+    running_jobs = {r.get("stage") for r in live.get("running", [])}
+
+    def next_text(runs_next_cycle: bool, waiting: int, why_not: str = "") -> dict:
+        if not on:
+            return {"next": "", "next_note": "When Sellbird runs."}
+        if not waiting:
+            return {"next": "", "next_note": "Nothing waiting for it."}
+        if runs_next_cycle:
+            return {"next": sched.get("next_at", ""),
+                    "next_note": "" if sched.get("next_at") else "In this cycle."}
+        return {"next": "", "next_note": why_not}
+
+    write_first = "Waits until the drafts that are ready are sent."
+    out = []
+
+    # 1. Finding businesses: only when you start it (Discover, or `sellbird discover`).
+    disc = await last_run("discover")
+    found_today = await _scalar("SELECT COUNT(*) FROM companies WHERE datetime(created_at) >= datetime(?)",
+                                (today,))
+    t, how, note = latest(run_last(disc))
+    out.append({
+        "key": "find", "label": "Finding businesses",
+        "what": "Searches maps and the web for businesses that fit who you sell to.",
+        "how": "Only when you start it, on Discover or with `sellbird discover`.",
+        "state": "running" if "discover" in running_jobs else "manual",
+        "last_at": t, "last_result": how, "last_note": note,
+        "last_detail": (f"{int(disc.get('records') or 0)} found with {_provider_label(disc.get('provider') or '') or 'a search'}"
+                        if disc else ""),
+        "next": "", "next_note": "When you start a search.",
+        "waiting": None, "done_today": found_today, "done_unit": "found",
+        "errors_today": await failed_runs("discover"),
+        "detail": steps.get("Find businesses", {}).get("detail", ""), "tab": "discover",
+    })
+
+    # 2. Reading websites: every cycle while some aren't read, or from Discover.
+    prof = await stage_rec("profile")
+    unread = max(0, (steps.get("Read their websites", {}).get("total") or 0)
+                 - (steps.get("Read their websites", {}).get("done") or 0))
+    t, how, note = latest(loop_last(prof), run_last(await last_run("profile")))
+    out.append({
+        "key": "read", "label": "Reading websites",
+        "what": "Reads each business's site for what they use and what's missing. Free.",
+        "how": "Every cycle while any are unread, or Read their sites on Discover.",
+        "state": "running" if ("profile" in running_jobs or prof.get("running")) else
+                 ("scheduled" if on else "off"),
+        "last_at": t, "last_result": how, "last_note": note,
+        **next_text(True, unread),
+        "waiting": unread, "waiting_unit": "to read",
+        "done_today": await _scalar(
+            "SELECT COUNT(*) FROM companies WHERE datetime(profile_checked_at) >= datetime(?)", (today,)),
+        "done_unit": "read",
+        "errors_today": int(prof.get("errors_today") or 0) + await failed_runs("profile"),
+        "detail": steps.get("Read their websites", {}).get("detail", ""), "tab": "discover",
+    })
+
+    # 3 and 4. Finding and checking emails: the Scout, on cycles with nothing to write.
+    scout = await stage_rec("prospect")
+    scout_state = ("running" if scout.get("running") else ("scheduled" if on else "off"))
+    find_step = steps.get("Find emails", {})
+    to_find = max(0, (find_step.get("total") or 0) - (find_step.get("done") or 0))
+    check_step = steps.get("Check emails are real", {})
+    to_check = max(0, (check_step.get("total") or 0) - (check_step.get("done") or 0))
+    t, how, note = latest(loop_last(scout))
+    scout_next = action == "prospect"
+    out.append({
+        "key": "emails", "label": "Finding emails",
+        "what": "Finds the right person and their email at each business it has read.",
+        "how": "The background loop, on cycles when nothing is ready to write.",
+        "state": scout_state, "last_at": t, "last_result": how, "last_note": note,
+        **next_text(scout_next, to_find or (1 if on else 0), write_first),
+        "waiting": to_find, "waiting_unit": "businesses",
+        "done_today": await _scalar(
+            "SELECT COUNT(*) FROM companies WHERE datetime(prospects_checked_at) >= datetime(?)", (today,)),
+        "done_unit": "checked",
+        "errors_today": int(scout.get("errors_today") or 0),
+        "detail": find_step.get("detail", ""), "tab": "contacts",
+    })
+    out.append({
+        "key": "verify", "label": "Checking emails",
+        "what": "Checks each email is real before anything is written to it.",
+        "how": "Done as each email is found, in the same step.",
+        "state": scout_state, "last_at": t, "last_result": how, "last_note": note,
+        **next_text(scout_next, to_check or (1 if on else 0), write_first),
+        "waiting": to_check, "waiting_unit": "not confirmed",
+        "done_today": await _scalar(
+            "SELECT COUNT(*) FROM prospects WHERE datetime(created_at) >= datetime(?) "
+            "AND email_status IN ('verified', 'risky', 'invalid')", (today,)),
+        "done_unit": "checked",
+        "errors_today": 0,
+        "detail": check_step.get("detail", ""), "tab": "contacts",
+    })
+
+    # 5. Writing: the Writer, on cycles with nothing ready to send.
+    writer = await stage_rec("write_campaign")
+    write_step = steps.get("Write first emails", {})
+    to_write = max(0, (write_step.get("total") or 0) - (write_step.get("done") or 0))
+    t, how, note = latest(loop_last(writer))
+    out.append({
+        "key": "write", "label": "Writing",
+        "what": "Writes a first email for each contact with a checked address.",
+        "how": "The background loop, when there's someone to write to.",
+        "state": "running" if writer.get("running") else ("scheduled" if on else "off"),
+        "last_at": t, "last_result": how, "last_note": note,
+        **next_text(action == "write_campaign", to_write, write_first),
+        "waiting": to_write, "waiting_unit": "to write",
+        "done_today": await _scalar(
+            "SELECT COUNT(*) FROM outbox WHERE kind = 'sequence' AND step = 1 "
+            "AND datetime(created_at) >= datetime(?)", (today,)),
+        "done_unit": "written",
+        "errors_today": int(writer.get("errors_today") or 0),
+        "detail": write_step.get("detail", ""), "tab": "campaigns",
+    })
+
+    # 6. Waiting for approval: you.
+    pending = await _scalar("SELECT COUNT(*) FROM outbox WHERE status = 'pending_review'")
+    out.append({
+        "key": "approve", "label": "Waiting for approval",
+        "what": "Drafts wait here until you approve them. Nothing goes out before that.",
+        "how": "You, in the Outbox.",
+        "state": "your_turn" if pending else "clear",
+        "last_at": "", "last_result": "", "last_note": "",
+        "next": "", "next_note": "Your turn." if pending else "Nothing to approve.",
+        "waiting": pending, "waiting_unit": "drafts",
+        "done_today": await _scalar(
+            "SELECT COUNT(*) FROM outbox WHERE status IN ('approved', 'sending', 'sent') "
+            "AND datetime(updated_at) >= datetime(?) AND COALESCE(approved_by, '') != ''", (today,)),
+        "done_unit": "approved",
+        "errors_today": 0, "detail": "", "tab": "outbox",
+    })
+
+    # 7. Sending: every cycle, inside each recipient's send window.
+    sender = await stage_rec("send_outbox", "send_campaign")
+    queued = await _scalar("SELECT COUNT(*) FROM outbox WHERE status IN ('approved', 'sending')")
+    t, how, note = latest(loop_last(sender))
+    held = ((await state.current_sends_held()) or {}).get("reason", "")
+    send_state = ("paused" if paused else "running" if sender.get("running")
+                  else "scheduled" if on else "off")
+    out.append({
+        "key": "send", "label": "Sending",
+        "what": "Sends approved emails at a steady pace, inside each person's working hours.",
+        "how": "The background loop, every cycle, after replies are read.",
+        "state": send_state, "last_at": t, "last_result": how, "last_note": note,
+        **(next_text(True, queued) if not paused else
+           {"next": "", "next_note": "Paused. Resume it on Controls."}),
+        "waiting": queued, "waiting_unit": "approved",
+        "done_today": await _scalar(
+            "SELECT COUNT(*) FROM outbox WHERE status = 'sent' AND datetime(sent_at) >= datetime(?)",
+            (today,)),
+        "done_unit": "sent",
+        "errors_today": int(sender.get("errors_today") or 0) + await _scalar(
+            "SELECT COUNT(*) FROM outbox WHERE status = 'failed' AND datetime(updated_at) >= datetime(?)",
+            (today,)),
+        "detail": f"Held this cycle: {held}" if held else "",
+        "tab": "outbox",
+    })
+
+    return {"scheduler": sched, "stages": out, "start_hint": LOOP_START_HINT,
+            "running": live.get("running", []), "stopped": live.get("stopped", []),
+            "next": live.get("next", ""), "next_tab": live.get("next_tab", ""),
+            "cost_usd": live.get("cost_usd", 0), "now": datetime.now(timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 def _require_approval_now() -> bool:
     try:

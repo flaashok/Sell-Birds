@@ -59,6 +59,15 @@ def _no_installed_humanizer(monkeypatch, tmp_path):
     monkeypatch.setattr(sellbird.humanize, "SKILL_PATH", tmp_path / "no-humanizer.md")
 
 
+import sellbird.collectors.discover  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _private_search_log(monkeypatch, tmp_path):
+    """Searches a test makes are noted in its own folder, not the checkout's data/."""
+    monkeypatch.setattr(sellbird.collectors.discover, "SEARCH_LOG", tmp_path / "search-hour.json")
+
+
 # Every CLI command seeds the home folder first (sellbird.home). Tests that
 # call cli.main() would create the checkout's data/, so seeding is a no-op
 # here; tests of seeding itself call the real function.

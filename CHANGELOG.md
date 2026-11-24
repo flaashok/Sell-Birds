@@ -9,6 +9,22 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **`discovery.auto: true` keeps the company list topped up by itself.**
+  Discovery used to run only when someone pressed Run on the Discover page,
+  and only while the dashboard stayed open. With the option on, the loop
+  starts a small run (`queries_per_run`, default 25) whenever the companies
+  the Scout hasn't checked drop below about `backlog_days` (default 2) of its
+  recent pace. Searches come in order from the same list the Discover page
+  builds, the place is saved across restarts, and after every search has run
+  it waits `repeat_after_days` (default 14) before starting again. Only free
+  sources run unless `max_daily_spend` is set. The Discover page gets an
+  "Automatic discovery" card with its state and Pause / Resume (pausing stops
+  a run that's going within seconds); a run started by hand there goes first,
+  and the page's Stop clears itself when that run ends instead of stopping
+  the next one. A "Discovery …" line under "Sellbird is running" in the
+  sidebar (click it to open Discover) and `sellbird status` show what it's doing, and Today says when it can't run (a
+  missing key, a spending cap, a source that stopped). Off by default.
+
 - **`writer.require_tip: true` skips prospects with nothing to build a tip
   on.** A first email is meant to name one concrete thing the sender would
   change; with no finding about the company, the draft could only say it had no

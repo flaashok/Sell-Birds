@@ -101,6 +101,14 @@ channels:
     max_daily_connections: 20
     max_daily_messages: 10
 
+discovery:
+  auto: false               # true: the loop tops up the company list by itself
+  queries_per_run: 25       # searches per top-up, taken in order from the Discover list
+  backlog_days: 2           # top up when fewer than ~2 days of unchecked companies are left
+  min_backlog: 100
+  max_daily_spend: 0        # 0: only free sources (OpenStreetMap, TinyFish) run on their own
+  repeat_after_days: 14     # after every search has run once, wait this long to start again
+
 usage:
   max_daily_claude_percent: 80
   heartbeat_interval_minutes: 15

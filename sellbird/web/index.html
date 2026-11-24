@@ -110,6 +110,8 @@
       <span class="status-dot stopped" id="header-dot"></span>
       <span id="header-status-text">Checking…</span>
     </div>
+    <button type="button" class="sellbird-status discovery-status" id="header-discovery"
+            onclick="goTab('discover')" style="display:none"></button>
     <div class="foot-actions">
       <div class="theme-switch" role="group" aria-label="Appearance">
         <button data-theme-opt="auto" onclick="setTheme('auto')" title="Match your computer" aria-label="Match your computer"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg></button>
@@ -201,10 +203,11 @@
   <div class="section-head">
     <div>
       <h2>Discover</h2>
-      <p>Find businesses matching your ICP. Pick a source, see what it will cost,
-         then run it &mdash; nothing is called until you press the button.</p>
+      <p>Find businesses matching your ICP. Run a search by hand below (pick a source,
+         see what it will cost, press Run), or let automatic discovery top up the list.</p>
     </div>
   </div>
+  <div id="discover-auto"></div>
   <div id="discover-profile"></div>
 
   <div class="subhead">Source</div>

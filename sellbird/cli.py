@@ -317,6 +317,11 @@ def cmd_status(args):
             label = {"claude": "Claude", "codex": "Codex"}.get(brain_status.get("provider"), "Brain")
             print(f"  Brain:                {label} PAUSED since {brain_status.get('since', '?')}")
             print(f"                        {brain_status.get('reason', '')}")
+        from sellbird import auto_discovery
+        _, discovery_line = auto_discovery.describe(
+            auto_discovery.parse(await state.get_setting(auto_discovery.AUTO_KEY)))
+        print(textwrap.fill(f"Discovery:            {discovery_line}", width=76,
+                            initial_indent="  ", subsequent_indent=" " * 24))
         print()
         return healthy
 

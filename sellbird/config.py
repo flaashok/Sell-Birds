@@ -830,6 +830,36 @@ class HandoffConfig(BaseModel):
     arguments: dict = {}
 
 
+class DiscoveryConfig(BaseModel):
+    """Automatic discovery (sellbird/auto_discovery.py). Off by default: the
+    Discover page's Run button is then the only way discovery runs."""
+
+    auto: bool = False
+    provider: str = ""            # empty: the source last picked on the Discover page
+    presets: list[str] = []       # search lists to go through in turn; empty: the plain ICP
+    queries_per_run: int = 25
+    backlog_days: float = 2.0     # top up below this many days of the Scout's pace
+    min_backlog: int = 100        # ...and never below this many unchecked companies
+    max_daily_spend: float = 0.0  # 0: only free sources run
+    repeat_after_days: int = 14   # rest after every search has run once
+    depth: int = 30
+    limit: int = 100
+
+    @field_validator("queries_per_run", "min_backlog", "repeat_after_days", "depth", "limit")
+    @classmethod
+    def _positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be at least 1")
+        return v
+
+    @field_validator("backlog_days", "max_daily_spend")
+    @classmethod
+    def _not_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("can't be negative")
+        return v
+
+
 class SellbirdConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -840,6 +870,7 @@ class SellbirdConfig(BaseModel):
     compliance: ComplianceConfig = ComplianceConfig()
     writer: WriterConfig = WriterConfig()
     handoff: HandoffConfig = HandoffConfig()
+    discovery: DiscoveryConfig = DiscoveryConfig()
     # The file it was loaded from, so a running Sellbird can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)

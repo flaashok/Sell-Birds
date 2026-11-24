@@ -875,6 +875,7 @@ async function loadDiscoverProviders() {
   const data = await api('/api/discover/providers');
   if (!data || !data.providers) { el.innerHTML = offlineState(); return; }
 
+  renderAutoDiscovery(data.auto || {});
   _provider = _provider || data.selected || data.default;
   el.innerHTML = '<div class="prov-grid">' + data.providers.map(p => {
     const ready = p.configured
@@ -969,6 +970,47 @@ async function estimateDiscovery() {
   btn.disabled = over;
   btn.textContent = over ? 'Over cap'
     : (data.free ? 'Run — free' : 'Run — spend up to $' + data.estimated_cost.toFixed(2));
+}
+
+// Automatic discovery (discovery.auto): the loop's own top-ups. Its Pause and
+// Resume are here; the Run and Stop below start and stop one run by hand.
+const AUTO_TONE = {running: 't-active', waiting: 't-idle', paused: 't-waiting', stopped: 't-idle',
+                   blocked: 't-bad'};
+
+function renderAutoDiscovery(a) {
+  const el = document.getElementById('discover-auto');
+  if (!el) return;
+  let body, button = '';
+  if (!a.enabled) {
+    body = '<div class="qtitle">Automatic discovery is off</div>' +
+      '<div class="qdetail">Set <code>discovery.auto: true</code> in sellbird.yaml and restart ' +
+      'Sellbird, and the loop tops up the company list by itself from the source picked ' +
+      'below, whenever the Scout is close to running out.</div>';
+  } else {
+    const line = a.line || '';
+    body = '<div class="qtitle">Automatic discovery <span class="badge ' +
+      (AUTO_TONE[a.state] || 't-idle') + '">' + escHtml(a.state || 'waiting') + '</span></div>' +
+      '<div class="qdetail">' + escHtml(line.charAt(0).toUpperCase() + line.slice(1)) + '.</div>';
+    button = a.paused
+      ? '<button class="btn btn-primary btn-sm" onclick="setAutoDiscovery(\'resume\', this)">Resume</button>'
+      : '<button class="btn btn-secondary btn-sm" onclick="setAutoDiscovery(\'pause\', this)">Pause</button>';
+  }
+  el.innerHTML = '<div class="card"><div class="queue-item" style="padding:0;border:0;box-shadow:none">' +
+    '<div class="qtext">' + body + '</div>' + button + '</div></div>';
+}
+
+async function setAutoDiscovery(action, btn) {
+  if (btn) btn.disabled = true;
+  const data = await api('/api/discover/auto/' + action, {method: 'POST'});
+  if (data && data.success) {
+    showToast(action === 'pause'
+      ? 'Automatic discovery paused. A run that was going stops within a few seconds.'
+      : 'Automatic discovery resumed. It checks again at the next heartbeat.', 'success');
+    renderAutoDiscovery(data.auto || {});
+  } else {
+    showToast(failMsg(data, 'Could not ' + action + ' it.'), 'error');
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function runDiscovery() {
@@ -1409,6 +1451,22 @@ async function testInstantly() {
 
 // ── Controls ──
 
+// Under "Sellbird is running", on every page: automatic discovery's state,
+// with the reason on hover; a click opens Discover. Hidden while it's off.
+const DISCOVERY_DOT = {running: 'running', waiting: 'stopped', paused: 'stopped', stopped: 'stopped',
+                       blocked: 'offline'};
+
+function renderDiscoveryStatus(d) {
+  const el = document.getElementById('header-discovery');
+  if (!el) return;
+  if (!d.enabled || !d.state || d.state === 'off') { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.title = d.line || '';
+  el.setAttribute('aria-label', 'Discovery ' + d.state + '. Open Discover.');
+  el.innerHTML = '<span class="status-dot ' + (DISCOVERY_DOT[d.state] || 'stopped') +
+    '"></span><span>Discovery ' + escHtml(d.state) + '</span>';
+}
+
 async function loadSellbirdStatus() {
   const data = await api('/api/sellbird/status');
   const headerDot = document.getElementById('header-dot');
@@ -1424,6 +1482,7 @@ async function loadSellbirdStatus() {
 
   headerDot.className = 'status-dot ' + (running ? 'running' : 'stopped');
   headerText.textContent = running ? 'Sellbird is running' : 'Sellbird is stopped';
+  renderDiscoveryStatus(data.discovery || {});
   document.getElementById('control-dot').className = 'dot ' + (running ? 'running' : 'stopped');
   const label = document.getElementById('control-label');
   label.className = 'label ' + (running ? 'running' : 'stopped');

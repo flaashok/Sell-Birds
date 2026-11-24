@@ -8,6 +8,7 @@ from datetime import datetime, time, timedelta
 
 import pytz
 
+from sellbird.auto_discovery import AutoDiscovery
 from sellbird.brain import Brain
 from sellbird.extensions import run_tick_steps
 from sellbird.sending_mode import sync_sending_mode
@@ -321,12 +322,18 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
     consecutive_errors = 0
+    discovery = AutoDiscovery()
 
     while not stop_event.is_set():
         try:
             # 0. Approval or autopilot, as the config file says now: the
             # dashboard can switch it while Sellbird runs.
             await sync_sending_mode(config, state)
+
+            # Automatic discovery (discovery.auto) tops up the company list in
+            # the background. It uses no model calls, so it runs through quiet
+            # hours and usage-limit pauses too.
+            await discovery.tick(state, config)
 
             # 1. Check quiet hours. With send windows in recipients' own time
             # zones, quiet hours only stop prospecting and writing: a cycle

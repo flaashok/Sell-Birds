@@ -68,8 +68,10 @@ REPLY_READERS = ("handle_replies", "read_replies")
 
 
 def in_quiet_hours(config: SellbirdConfig) -> bool:
-    """Check if we're currently in quiet hours."""
+    """Check if we're currently in quiet hours. Never, when they're off."""
     qh = config.usage.quiet_hours
+    if not qh.enabled:
+        return False
     tz = pytz.timezone(qh.timezone)
     now = datetime.now(tz).time()
     start = time.fromisoformat(qh.start)
@@ -100,6 +102,12 @@ def sends_through_quiet_hours(config: SellbirdConfig) -> bool:
     window = send_window_of(config)
     return bool(window is not None and window.recipient_timezone
                 and email.enabled and email.provider in NATIVE_PROVIDERS)
+
+
+def quiet_background_work(config) -> bool:
+    """usage.quiet_hours.background_work."""
+    qh = getattr(getattr(config, "usage", None), "quiet_hours", None)
+    return bool(getattr(qh, "background_work", False))
 
 
 def seconds_until_quiet_hours_end(config: SellbirdConfig) -> int:
@@ -333,7 +341,10 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # still reads replies and sends what's due (sends_through_quiet_hours).
             quiet = in_quiet_hours(config)
             send_only = quiet and sender.is_native and sends_through_quiet_hours(config)
-            if quiet and not send_only:
+            # quiet_hours.background_work: work that contacts no one carries
+            # on at night; replies and sending still wait.
+            background = quiet and quiet_background_work(config)
+            if quiet and not send_only and not background:
                 sleep_for = seconds_until_quiet_hours_end(config)
                 logger.info(f"Quiet hours. Sleeping for {sleep_for // 60} minutes.")
                 # Sleep in short polled chunks rather than one multi-hour
@@ -355,8 +366,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # Quiet hours wake only for cold email that can go now: due,
             # inside its recipient's window, not held by a cap or a pause.
             # Replies wait for the operator's hours, as they always have.
-            sender.cold_only = send_only
-            if send_only and not await sender.cold_due_in_window():
+            sender.cold_only = quiet
+            cold_now = send_only and await sender.cold_due_in_window()
+            if send_only and not cold_now and not background:
                 logger.info(
                     f"Quiet hours. No cold email can go now; checking again in "
                     f"{config.usage.heartbeat_interval_minutes} minutes."
@@ -394,7 +406,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 continue
 
             # 4. Decide what to do (in quiet hours: only read replies and send)
-            if send_only:
+            if quiet and not background:
                 logger.info("Quiet hours: reading replies, then sending what's due "
                             "in recipients' own time zones.")
                 summary = {}
@@ -403,6 +415,12 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 logger.info("Checking pipeline state...")
                 summary = await state.get_state_summary()
                 action = await decide_next_action(brain, state, config, summary=summary)
+                if background and action == "send_campaign" and not sender.is_native:
+                    # Deploying to Instantly starts sending: that waits for morning.
+                    action = "idle"
+                if background:
+                    logger.info("Quiet hours: background work only; replies and sending "
+                                "wait, except cold email due in its recipient's hours.")
 
             # 5. Execute — run independent agents in parallel where possible
             # Handler is always safe to run alongside other agents
@@ -431,7 +449,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 send_tasks.append(("send_campaign", sender.run))
             elif sender.is_native:
                 send_tasks.append(("send_outbox", sender.run))
-            if sender.is_native or has_open_convos:
+            if quiet and not cold_now and action != "send_campaign":
+                # Quiet hours with background work: nothing is due in a
+                # recipient's hours, so nothing sends and replies wait.
+                send_tasks = []
+            if (sender.is_native or has_open_convos) and (not quiet or send_tasks):
                 tasks.append(("handle_replies", handler.run()))
 
             # Profiling rides along every cycle. It is three HTTP requests per

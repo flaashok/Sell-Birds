@@ -22,7 +22,7 @@
 
 **Emails land in spam** — Almost always the domain, not the copy. Check SPF/DKIM/DMARC, confirm warmup ran ([TrulyInbox](https://trulyinbox.com/?via=sellbird) shows the inbox rate; `sellbird warmup` reads it once connected), halve your volume.
 
-**Sellbird does nothing during the day** — Check `quiet_hours` and whether it hit `max_daily_claude_percent`. `sellbird status` shows current state; the `actions` table logs every decision.
+**Sellbird does nothing during the day** — Check `quiet_hours` (`enabled: false` turns them off; `background_work: true` keeps work that contacts no one running through them) and whether it hit `max_daily_claude_percent`. `sellbird status` shows current state; the `actions` table logs every decision.
 
 **How do I stop it right now?** — `Ctrl+C`, or `sellbird sending pause` to stop outbound while leaving the loop running. State is in SQLite, so it resumes cleanly.
 

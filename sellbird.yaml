@@ -105,6 +105,9 @@ usage:
   max_daily_claude_percent: 80
   heartbeat_interval_minutes: 15
   quiet_hours:
+    enabled: true              # false: no quiet hours, Sellbird works around the clock
+    background_work: false     # true: reading sites, prospecting and writing drafts run at night;
+                               # replies and sending still wait
     start: "22:00"
     end: "07:00"
     timezone: "America/New_York"

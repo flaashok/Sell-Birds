@@ -176,3 +176,24 @@ def test_load_env_reads_environment(monkeypatch):
 def test_env_config_rejects_non_string():
     with pytest.raises(ValidationError):
         EnvConfig(instantly_api_key=["not", "a", "string"])
+
+
+def test_quiet_hours_on_by_default():
+    assert QuietHoursConfig().enabled is True
+
+
+def test_quiet_hours_can_be_turned_off():
+    data = dict(MINIMAL)
+    data["usage"] = {"quiet_hours": {"enabled": False}}
+    config = SellbirdConfig(**data)
+    assert config.usage.quiet_hours.enabled is False
+
+
+def test_in_quiet_hours_is_never_true_when_off():
+    from types import SimpleNamespace
+
+    from sellbird.main import in_quiet_hours
+
+    # When on, 00:00 to 23:59 covers nearly the whole day.
+    off = QuietHoursConfig(enabled=False, start="00:00", end="23:59", timezone="UTC")
+    assert in_quiet_hours(SimpleNamespace(usage=SimpleNamespace(quiet_hours=off))) is False

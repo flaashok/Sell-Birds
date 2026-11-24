@@ -255,6 +255,18 @@ def cmd_status(args):
             print("  Prospecting:          PAUSED")
             print(textwrap.fill(backlog, width=72, initial_indent="                        ",
                                 subsequent_indent="                        "))
+        qh = getattr(getattr(loaded, "usage", None), "quiet_hours", None)
+        if qh is not None:
+            if not getattr(qh, "enabled", True):
+                scope = "off; Sellbird works around the clock"
+            elif getattr(qh, "background_work", False):
+                scope = (f"{qh.start}-{qh.end} {qh.timezone}; work that contacts no one keeps "
+                         "running, replies and sending wait")
+            else:
+                scope = (f"{qh.start}-{qh.end} {qh.timezone}; everything waits except cold "
+                         "email due in recipients' hours")
+            print(textwrap.fill(f"{'Quiet hours:':<22}{scope}", width=76,
+                                initial_indent="  ", subsequent_indent=" " * 24))
         if notice:
             print("  Sending:              HELD")
             print(textwrap.fill(notice, width=72, initial_indent="                        ",

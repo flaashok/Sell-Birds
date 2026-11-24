@@ -197,3 +197,84 @@ def test_the_outbox_card_on_today_says_which_mode(client, monkeypatch):
         monkeypatch.setattr(dash, "_require_approval_now", lambda a=approval: a)
         [card] = [i for i in client.get("/api/today").json()["items"] if i["key"] == "outbox"]
         assert words in card["detail"]
+
+
+# ── an IMAP inbox that can't log in holds sending instead of reading as empty ──
+
+
+def _imap(monkeypatch, error):
+    from sellbird.integrations import smtp_mail
+
+    class Conn:
+        def __init__(self, *a, **k):
+            pass
+
+        def login(self, user, password):
+            raise error
+
+        def logout(self):
+            pass
+
+    monkeypatch.setattr(smtp_mail.imaplib, "IMAP4_SSL", Conn)
+    settings = smtp_mail.SmtpSettings(host="smtp.example.org", username="sales@example.org",
+                                      password="pw", imap_host="imap.example.org")
+    from sellbird.integrations.mail_provider import MailIdentity
+    return smtp_mail.SmtpImapProvider(SimpleNamespace(), SimpleNamespace(),
+                                      identity=MailIdentity("sales@example.org", "Sam"),
+                                      smtp=settings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_says,expect", [
+    (b"[ALERT] Application-specific password required: https://support.example.org (Failure)",
+     "needs an app password"),
+    (b"[AUTHENTICATIONFAILED] Invalid credentials (Failure)", "invalid credentials"),
+    (b"something else broke", "something else broke"),
+])
+async def test_an_imap_login_failure_is_raised_with_the_fix(monkeypatch, server_says, expect):
+    from sellbird.integrations.smtp_mail import ImapReadError
+    import imaplib
+    provider = _imap(monkeypatch, imaplib.IMAP4.error(server_says))
+    with pytest.raises(ImapReadError, match=expect) as info:
+        await provider.get_replies()
+    assert "sales@example.org" in str(info.value) or expect == "something else broke"
+
+
+@pytest.mark.asyncio
+async def test_every_failing_inbox_is_named(state):
+    from tests.test_outbox_native import FakeProvider, make_handler
+    handler = make_handler(state, FakeProvider())
+    for name in ("one", "two"):
+        bad = FakeProvider()
+        bad.get_replies = AsyncMock(side_effect=RuntimeError(f"{name} refused"))
+        assert await handler._read_inbox(bad, None, label=f"{name}@example.org") is False
+    assert "one refused" in handler.last_read_problem
+    assert "two refused" in handler.last_read_problem
+
+
+def test_an_imap_login_hold_names_the_fix():
+    reason = ("sales@example.org (smtp): IMAP login for sales@example.org needs an app "
+              "password: the mail provider refused the account password.")
+    title, detail = held_message({"reason": reason, "since": "2026-10-24T08:00:00"}, waiting=2)
+    assert "couldn't read your inbox" in title
+    assert "sellbird inboxes connect" in detail and "2 emails are waiting" in detail
+
+
+# ── a held send phase doesn't win the cycle ──
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held, action", [(True, "prospect"), (False, "send_campaign")])
+async def test_drafts_held_by_an_unread_inbox_dont_starve_prospecting(held, action):
+    from sellbird.main import decide_next_action
+    email = SimpleNamespace(enabled=True, provider="smtp", require_approval=True)
+    config = SimpleNamespace(channels=SimpleNamespace(email=email))
+    summary = {"draft_campaigns": 4, "new_prospects": 0, "writable_prospects": 0,
+               "sends_held": held}
+    assert await decide_next_action(None, None, config, summary=summary) == action
+
+
+@pytest.mark.asyncio
+async def test_the_summary_says_when_sending_is_held(state):
+    assert (await state.get_state_summary())["sends_held"] is False
+    await state.note_sends_held("IMAP login was refused (invalid credentials).")
+    assert (await state.get_state_summary())["sends_held"] is True

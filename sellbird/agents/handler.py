@@ -1175,7 +1175,10 @@ class Handler:
         except Exception as e:
             logger.error(f"Handler: fetching replies failed for {name}: {e}")
             # Kept for the heartbeat: sending is held, and Today says why.
-            self.last_read_problem = f"{name}: {e}"
+            # Every failing inbox is named, not just the last one read.
+            problem = f"{name}: {e}"
+            self.last_read_problem = (f"{self.last_read_problem}; {problem}"
+                                      if self.last_read_problem else problem)
             return False
 
         handled = 0

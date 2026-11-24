@@ -53,6 +53,9 @@ def held_message(hold: dict, waiting: int) -> tuple[str, str]:
             fix = "Run `sellbird gmail auth` to sign in again."
         elif "sellbird microsoft auth" in low:
             fix = "Run `sellbird microsoft auth` to sign in again."
+        elif "imap login" in low and ("app password" in low or "invalid credentials" in low):
+            fix = ("Make an app password for that inbox and connect it again "
+                   "(`sellbird inboxes connect`), or remove the inbox if Sellbird shouldn't read it.")
         elif "refusing a partial read" in low:
             fix = ("The mailbox got more mail in the last week than Sellbird reads, so it can't "
                    "be sure it saw every reply. Send from a dedicated mailbox, or archive old mail.")

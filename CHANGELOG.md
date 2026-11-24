@@ -189,6 +189,21 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **An SMTP inbox that can't log in to IMAP holds sending instead of reading
+  as empty.** A refused IMAP login (a Gmail account that wants an app
+  password, a changed password) was logged and then reported as "no new
+  replies", so replies to that inbox went unread, their follow-ups could still
+  go out, and nothing on Today said so. The IMAP read now raises like the Gmail
+  and Microsoft readers do: sending is held, Today and `sellbird status` show
+  "couldn't read your inbox" with the inbox, the reason and the fix, and every
+  failing inbox is named rather than only the last one.
+
+- **Drafts held by an unread inbox no longer stop prospecting and writing.**
+  While sending was held because replies couldn't be read, ready drafts still
+  made `send_campaign` the cycle's job, which deployed nothing, so the Scout
+  and the Writer never ran until the inbox was fixed. A read hold now counts
+  as held, like the sending kill switch.
+
 - **Instantly's daily cap counts your local day, not UTC** (from #177 by
   @solvejet-team), so the cap resets at your midnight.
 

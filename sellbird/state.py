@@ -2800,6 +2800,9 @@ class StateManager:
             "active_campaigns": active_campaigns,
             # The kill switch: native sending stages nothing while it's set.
             "sending_paused": bool(await self.get_setting("sending_paused")),
+            # Sending held because replies couldn't all be read: drafts can't
+            # deploy, so they mustn't win the cycle over finding people.
+            "sends_held": bool(await self.current_sends_held()),
             "open_conversations": open_conversations,
             "auto_reply_handoffs": auto_reply_handoffs,
             "usage_today": usage_today,  # Claude calls (kept for compatibility)

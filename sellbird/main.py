@@ -185,7 +185,11 @@ async def decide_next_action(
     email = getattr(getattr(config, "channels", None), "email", None)
     native_paused = (summary.get("sending_paused")
                      and getattr(email, "provider", "") != "instantly")
-    held = (legacy_sending_held(config) or native_paused
+    # A native send phase held by unread replies (an inbox Sellbird can't
+    # read) deploys nothing either; choosing it every cycle starved the
+    # Scout and Writer until the inbox was fixed.
+    read_held = summary.get("sends_held") and getattr(email, "provider", "") != "instantly"
+    held = (legacy_sending_held(config) or native_paused or read_held
             or not getattr(email, "enabled", True))
     deployable = 0 if held else draft_campaigns
 

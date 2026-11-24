@@ -50,6 +50,28 @@ _DEFINITE_SMTP_ERRORS = (
 )
 
 
+class ImapReadError(Exception):
+    """The inbox couldn't be read. Raised (not swallowed into "no replies")
+    so the Handler holds sending and Today says why: an unread reply can't
+    stop its follow-ups."""
+
+
+def imap_problem(user: str, error: Exception) -> str:
+    """A plain reason for a failed IMAP read, with the fix when it's known."""
+    text = error.args[0] if getattr(error, "args", None) else error
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    text = str(text).strip()
+    low = text.lower()
+    who = f"IMAP login for {user}" if user else "IMAP login"
+    if "application-specific password" in low:
+        return (f"{who} needs an app password: the mail provider refused the account "
+                "password. Create an app password and reconnect this inbox with it.")
+    if "authenticationfailed" in low or "invalid credentials" in low:
+        return f"{who} was refused (invalid credentials). Reconnect this inbox with a working password."
+    return f"Couldn't read the inbox over IMAP: {text[:200]}"
+
+
 @dataclass
 class SmtpSettings:
     """Another inbox's server settings, for a caller that keeps them itself.
@@ -144,9 +166,12 @@ class SmtpImapProvider(MailProvider):
         loop = asyncio.get_event_loop()
         try:
             return await loop.run_in_executor(None, self._fetch_unseen, limit)
+        except ImapReadError:
+            raise
         except Exception as e:
-            logger.error(f"IMAP fetch failed: {e}")
-            return []
+            problem = imap_problem(self.imap_user, e)
+            logger.error(f"IMAP fetch failed: {problem}")
+            raise ImapReadError(problem) from e
 
     def _fetch_unseen(self, limit: int) -> list[InboundMessage]:
         out: list[InboundMessage] = []
@@ -156,7 +181,7 @@ class SmtpImapProvider(MailProvider):
             conn.select("INBOX")
             status, data = conn.search(None, "UNSEEN")
             if status != "OK":
-                return []
+                raise ImapReadError(f"IMAP search for new mail failed ({status}).")
             ids = data[0].split()[-limit:]
             for msg_id in ids:
                 status, parts = conn.fetch(msg_id, "(RFC822)")

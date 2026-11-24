@@ -317,6 +317,12 @@ def cmd_status(args):
             label = {"claude": "Claude", "codex": "Codex"}.get(brain_status.get("provider"), "Brain")
             print(f"  Brain:                {label} PAUSED since {brain_status.get('since', '?')}")
             print(f"                        {brain_status.get('reason', '')}")
+        from sellbird.brain import QUOTA_STATUS_KEY, describe_quota
+        quota_line = describe_quota(await state.get_setting(QUOTA_STATUS_KEY),
+                                    brain_config.provider if brain_config else "")
+        if quota_line:
+            print(textwrap.fill(f"Usage budget:         {quota_line}", width=76,
+                                initial_indent="  ", subsequent_indent=" " * 24))
         print()
         return healthy
 

@@ -67,3 +67,11 @@ def _no_home_seeding(monkeypatch):
     import sellbird.home
 
     monkeypatch.setattr(sellbird.home, "seed_home", lambda home, source: [])
+
+
+@pytest.fixture(autouse=True)
+def _private_quota_reading(monkeypatch, tmp_path):
+    """Never read or write the checkout's real data/claude-quota.json, and
+    never let one test's saved reading leak into another."""
+    import sellbird.integrations.quota as quota
+    monkeypatch.setattr(quota, "shared_path", lambda: tmp_path / "claude-quota.json")

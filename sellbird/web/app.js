@@ -1520,11 +1520,19 @@ function quotaCardHtml(data) {
   if (!provider) return '';
   const title = provider === 'codex' ? 'Codex (ChatGPT plan) Quota' : 'Claude Subscription Quota';
   let html = '<h2>' + escHtml(title) + '</h2>';
+  // What the loop's budget went by last: the live quota, an earlier reading,
+  // or its own call count (and why), so a pause is never a mystery.
+  const budget = data.budget_note
+    ? '<p class="muted" style="margin-top:10px">Sellbird\'s usage budget: ' + escHtml(data.budget_note) + '.</p>'
+    : '';
   if (!data.quota || !Object.keys(data.quota).length) {
-    const why = provider === 'codex'
-      ? "Quota unavailable: Sellbird couldn't read your ChatGPT plan's limits (check codex login, the Codex CLI version, and network)."
-      : "Quota unavailable: Sellbird couldn't read your Claude subscription's limits (check claude login and network).";
-    return html + '<p class="muted">' + escHtml(why) + ' Until it can, budgets count Sellbird\'s own calls.</p>';
+    const why = data.quota_problem
+      ? "Quota unavailable: " + data.quota_problem + "."
+      : provider === 'codex'
+        ? "Quota unavailable: Sellbird couldn't read your ChatGPT plan's limits (check codex login, the Codex CLI version, and network)."
+        : "Quota unavailable: Sellbird couldn't read your Claude subscription's limits (check claude login and network).";
+    return html + '<p class="muted">' + escHtml(why) + ' Until it can, budgets count Sellbird\'s own calls ' +
+      '(usage.fallback_daily_calls).</p>' + budget;
   }
   const labels = {five_hour: '5-hour window', seven_day: 'Weekly', primary: 'Primary window',
                   secondary: 'Secondary window', limit_reached: 'Usage limit reached'};
@@ -1540,7 +1548,7 @@ function quotaCardHtml(data) {
       '<div class="progress-bar"><div class="progress-fill ' + color + '" style="width:' + pct + '%"></div></div>' +
     '</div>';
   }
-  return html;
+  return html + budget;
 }
 
 async function loadUsage() {

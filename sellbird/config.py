@@ -678,6 +678,9 @@ class QuietHoursConfig(BaseModel):
 
 class UsageConfig(BaseModel):
     max_daily_claude_percent: float = 80.0
+    # Brain calls a day treated as the whole plan when the real quota can't
+    # be read; Sellbird then stops at max_daily_claude_percent of this.
+    fallback_daily_calls: int = 200
     heartbeat_interval_minutes: int = 15
     quiet_hours: QuietHoursConfig = QuietHoursConfig()
 
@@ -686,6 +689,13 @@ class UsageConfig(BaseModel):
     def _valid_percent(cls, v: float) -> float:
         if not 0 < v <= 100:
             raise ValueError("max_daily_claude_percent must be between 0 and 100")
+        return v
+
+    @field_validator("fallback_daily_calls")
+    @classmethod
+    def _valid_fallback_calls(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("fallback_daily_calls must be at least 1")
         return v
 
     @field_validator("heartbeat_interval_minutes")

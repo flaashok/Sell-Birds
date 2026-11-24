@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sellbird.state import StateManager
@@ -46,6 +47,30 @@ PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex"}
 # status` and the dashboard: {"provider", "status": "ok"|"paused", "reason",
 # "since", and for pauses "kind" (plus "until", epoch seconds, for usage limits)}.
 BRAIN_STATUS_KEY = "brain_status"
+
+# Settings key holding what the last usage-budget check went by, so a pause
+# caused by an unreadable quota is visible: {"provider", "source": "live" |
+# "saved" | "calls", "problem", "worst" (percent, quota sources), "calls" and
+# "max_calls" (call counter), "within", "at"}.
+QUOTA_STATUS_KEY = "brain_quota"
+
+
+def describe_quota(raw: str, provider: str) -> str:
+    """One line on what the budget gate went by, or "" if not recorded."""
+    q = active_brain_status(raw, provider)
+    if not q:
+        return ""
+    if q.get("source") in ("live", "saved"):
+        line = f"{q.get('worst', 0):.0f}% of plan used (limit {q.get('max_percent', 0):.0f}%)"
+        if q.get("source") == "saved":
+            line += f"; reading from {q.get('age_minutes', '?')} min ago, {q.get('problem', '')}"
+        return line
+    line = (f"quota unreadable, counting calls instead: {q.get('calls', 0)} of "
+            f"{q.get('max_calls', 0)} today")
+    if q.get("problem"):
+        line += f" ({q['problem']})"
+    return line
+
 
 # Codex failures that repeat on every call until the operator acts (login,
 # CLI version, model choice, an unsafe Codex config layer). After one, the
@@ -684,11 +709,17 @@ class Brain:
             except Exception as e:
                 logger.debug(f"Quota check errored: {e}")
                 windows = None
+            status = getattr(self.quota, "status", None)
+            status = status() if callable(status) else {}
             if windows:
                 worst = max(
                     (w["utilization"] for w in windows.values()), default=0.0
                 )
                 within = worst < max_percent
+                await self._note_quota(source=status.get("source") or "live",
+                                       problem=status.get("problem", ""),
+                                       age_minutes=status.get("age_minutes"),
+                                       worst=worst, max_percent=max_percent, within=within)
                 if not within:
                     resets = ", ".join(
                         f"{name} resets {w['resets_at']}"
@@ -700,9 +731,31 @@ class Brain:
                         f"{max_percent:.0f}% limit. {resets}"
                     )
                 return within
+            problem = status.get("problem") or "quota not readable"
+        else:
+            problem = ""
 
         calls = await self.check_usage()
-        return calls < max_daily_calls
+        within = calls < max_daily_calls
+        await self._note_quota(source="calls", problem=problem, calls=int(calls),
+                               max_calls=max_daily_calls, within=within)
+        if not within and problem:
+            logger.info(f"{self.provider_label} quota unreadable ({problem}); "
+                        f"went by Sellbird's call count instead: {int(calls)} of "
+                        f"{max_daily_calls} today (usage.fallback_daily_calls).")
+        return within
+
+    async def _note_quota(self, **fields):
+        """Save what the budget gate went by, when it changed (best effort)."""
+        record = {"provider": self.provider, **fields}
+        if record == getattr(self, "_last_quota_note", None):
+            return
+        self._last_quota_note = record
+        try:
+            await self.state.set_setting(QUOTA_STATUS_KEY, json.dumps(
+                {**record, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
+        except Exception as e:
+            logger.debug(f"Could not save quota status: {e}")
 
     async def _think_transport(self, prompt: str, *, expect_json: bool, timeout: float,
                                agent: str, task: str) -> str:

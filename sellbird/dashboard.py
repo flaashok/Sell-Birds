@@ -1163,12 +1163,22 @@ async def get_usage():
     brain = _active_brain()
     provider = brain.provider if brain else ""
     quota = None
+    quota_problem = ""
     try:
         client = _quota_client_for(provider, brain.model if brain else "")
         if client is not None:
             quota = await client.get_utilization()
+            status = getattr(client, "status", None)
+            if callable(status):
+                quota_problem = status().get("problem", "")
     except Exception as e:
         logger.debug("Quota lookup failed: %s", e)
+
+    # What the loop's usage budget last went by (brain.QUOTA_STATUS_KEY): the
+    # live quota, an earlier reading, or Sellbird's own call count and why.
+    from sellbird.brain import QUOTA_STATUS_KEY, describe_quota
+    rows = await query_db("SELECT value FROM settings WHERE key = ?", (QUOTA_STATUS_KEY,))
+    budget_note = describe_quota(rows[0]["value"], provider) if rows else ""
 
     return {
         "provider": provider,
@@ -1177,6 +1187,8 @@ async def get_usage():
         # "unavailable" for the active provider instead of hiding the gauge.
         "quota_provider": provider,
         "quota_status": ("available" if quota else "unavailable") if provider else "",
+        "quota_problem": quota_problem,
+        "budget_note": budget_note,
         "by_provider": by_provider,
         "totals": totals,
         "by_day": by_day,

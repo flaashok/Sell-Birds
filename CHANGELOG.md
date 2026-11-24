@@ -189,6 +189,22 @@ minor versions can still change behaviour.
 
 ### Fixed
 
+- **A rate-limited Claude quota no longer pauses Sellbird on a guess.** When
+  Anthropic's usage endpoint answered 429, Sellbird asked again a minute later and
+  fell straight back to its own call count, capped at a hardcoded 200 calls a
+  day, so a busy day paused the loop for hours while the plan had room. The
+  endpoint allows only a few reads an hour per login, and the loop, the
+  dashboard and every `sellbird status` each read it on their own. Now they
+  share one saved reading (`data/claude-quota.json`): the endpoint is asked
+  at most every 10 minutes in all, a 429's Retry-After (or 15, 30, then 60
+  minutes) holds for every process, a good reading up to an hour old is
+  reused through an outage, and the fallback cap is a
+  setting (`usage.fallback_daily_calls`, default 200). `sellbird status`, the
+  Usage page's quota card and the pause log line say which signal the budget
+  went by and why (the card now names the real reason, such as a 429, instead
+  of "check claude login"), so a pause from the call count is no longer
+  mistaken for the plan running out.
+
 - **Instantly's daily cap counts your local day, not UTC** (from #177 by
   @solvejet-team), so the cap resets at your midnight.
 

@@ -319,7 +319,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     analyst = Analyst(state)
 
     interval = config.usage.heartbeat_interval_minutes * 60
-    max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
+    max_calls = max(int(config.usage.fallback_daily_calls
+                        * (config.usage.max_daily_claude_percent / 100)), 1)
     consecutive_errors = 0
 
     while not stop_event.is_set():
@@ -384,10 +385,13 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if not await brain.is_within_budget(
                 max_calls, max_percent=config.usage.max_daily_claude_percent
             ):
+                from sellbird.brain import QUOTA_STATUS_KEY, describe_quota
+                why = describe_quota(await state.get_setting(QUOTA_STATUS_KEY), brain.provider)
                 logger.info(
-                    f"{brain.provider_label} usage limit reached "
-                    f"({config.usage.max_daily_claude_percent}% of quota or "
-                    f"{max_calls} calls). Sleeping 1h, then re-checking."
+                    f"{brain.provider_label} usage limit reached ("
+                    + (why or f"{config.usage.max_daily_claude_percent}% of quota or "
+                              f"{max_calls} calls")
+                    + "). Sleeping 1h, then re-checking."
                 )
                 if await _interruptible_sleep(3600, stop_event):
                     break

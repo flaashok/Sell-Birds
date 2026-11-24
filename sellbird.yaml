@@ -103,6 +103,7 @@ channels:
 
 usage:
   max_daily_claude_percent: 80
+  fallback_daily_calls: 200    # used only when the plan's real usage can't be read
   heartbeat_interval_minutes: 15
   quiet_hours:
     start: "22:00"

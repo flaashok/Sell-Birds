@@ -9,6 +9,16 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Companies and Contacts: search, a status filter, sortable columns, and
+  no sideways scrolling.** Companies gets a search box (name, website,
+  industry, location) and a status filter with counts. Every column header
+  on both tabs sorts, and a second click reverses it. Contacts fits a laptop
+  screen: the Score column (almost always 0) is gone, Source sits under
+  Added, and long names, companies, emails, locations and industries are
+  cut with the whole text on hover. Both tabs now load every row (Companies
+  stopped at 2,000, Contacts at the newest 200), so filters and counts cover
+  everything, and Companies sends only the columns it shows.
+
 - **`writer.require_tip: true` skips prospects with nothing to build a tip
   on.** A first email is meant to name one concrete thing the sender would
   change; with no finding about the company, the draft could only say it had no

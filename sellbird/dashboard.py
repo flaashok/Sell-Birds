@@ -730,14 +730,18 @@ async def test_instantly(request: Request):
 
 
 # The Companies tab shows the best-fit companies, up to this many; the CSV has all.
-COMPANIES_TAB_LIMIT = 2000
+COMPANIES_TAB_LIMIT = 20000
+CONTACTS_TAB_LIMIT = 20000
 
 
 @app.get("/api/companies")
 async def get_companies():
-    """Companies with contact counts, fit score and register status, best fit first."""
+    """Companies with contact counts, fit score and register status, best fit first.
+    Only the columns the table shows: the page filters and sorts all of them
+    in the browser, and a company's own page loads the rest."""
     rows = await query_db("""
-        SELECT c.*,
+        SELECT c.id, c.name, c.domain, c.website, c.industry, c.location, c.source,
+            c.created_at,
             (SELECT COUNT(*) FROM prospects p WHERE p.company_id = c.id) as contact_count
         FROM companies c ORDER BY c.created_at DESC
     """)
@@ -1188,7 +1192,8 @@ async def get_usage():
 
 @app.get("/api/prospects")
 async def get_prospects():
-    rows = await query_db("SELECT * FROM prospects ORDER BY created_at DESC LIMIT 200")
+    rows = await query_db("SELECT * FROM prospects ORDER BY created_at DESC LIMIT ?",
+                          (CONTACTS_TAB_LIMIT,))
     # Someone whose opt-out was undone keeps a way to see what happened.
     undone = {r["pid"] for r in await query_db(
         "SELECT DISTINCT json_extract(details_json, '$.prospect_id') AS pid FROM actions "
